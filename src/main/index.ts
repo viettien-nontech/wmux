@@ -46,6 +46,7 @@ import { reportExplorerCwd } from './explorer-roots';
 import { ensurePowerShellShim } from './powershell-shim';
 import { loadSettings } from './settings-store';
 import { resolveQuotaTool, startQuotaPoller } from './quota-poller';
+import { resolveTokenTool, readPaneTokens, type PaneRequest } from './token-poller';
 import fs from 'fs';
 import path from 'path';
 
@@ -1114,6 +1115,13 @@ app.whenReady().then(() => {
   // The push above cannot reach a renderer that has not mounted yet, and the
   // first tick always beats it there. Let whoever mounts ask for what it missed.
   ipcMain.handle(IPC_CHANNELS.QUOTA_GET, () => quotaPoller.last());
+
+  // Per-pane token counts. No timer and no push: the renderer knows which
+  // panes have agents and asks for those, so a window with no agent open
+  // spawns nothing at all.
+  ipcMain.handle(IPC_CHANNELS.TOKEN_GET, (_event, panes: PaneRequest[]) =>
+    readPaneTokens(resolveTokenTool(loadSettings(), os.homedir()), panes),
+  );
 
   portScanner.onResults((portsByPid) => {
     BrowserWindow.getAllWindows().forEach(win => {

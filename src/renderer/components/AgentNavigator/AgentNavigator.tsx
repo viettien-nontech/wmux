@@ -4,6 +4,7 @@ import { useT } from '../../i18n';
 import { rollupAgents, workspaceAgentState } from '../../store/agent-rollup';
 import type { AgentRosterEntry, AgentPresenceState } from '../../store/agent-rollup';
 import { formatDwell } from '../Sidebar/AgentRosterBanner';
+import { parsePaneTokens, formatTokens, type PaneTokens } from './tokens';
 import '../../styles/agent-navigator.css';
 
 type Filter = 'all' | AgentPresenceState;
@@ -82,6 +83,48 @@ export default function AgentNavigator({ onClose, onFocusAgent }: {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
+
+  /**
+   * Token counts for the listed panes.
+   *
+   * Asked for only while this overlay is open, and only for panes that have an
+   * agent and a known cwd: every read is a real process spawn against a
+   * transcript file, so polling them behind a closed overlay would spend that
+   * on nothing anyone is looking at. Five seconds rather than one — the number
+   * moves once per agent turn, not once per tick of `now`.
+   *
+   * The effect is keyed on WHICH panes are listed, not on `rollup`, which is
+   * rebuilt every second by the dwell clock and would otherwise restart the
+   * poll (and re-spawn the tool) once a second.
+   */
+  const [paneTokens, setPaneTokens] = useState<Record<string, PaneTokens>>({});
+  const readable = useMemo(
+    () => ordered
+      .filter((e): e is AgentRosterEntry & { kind: string; cwd: string } => !!e.kind && !!e.cwd)
+      .map((e) => ({ surfaceId: e.surfaceId, kind: e.kind, cwd: e.cwd })),
+    [ordered],
+  );
+  const readableKey = readable.map((p) => `${p.surfaceId} ${p.kind} ${p.cwd}`).join('|');
+
+  useEffect(() => {
+    if (readable.length === 0) { setPaneTokens({}); return; }
+    let cancelled = false;
+    const ask = (): void => {
+      window.wmux?.token?.get?.(readable).then((raw: Record<string, unknown>) => {
+        if (cancelled || !raw) return;
+        const next: Record<string, PaneTokens> = {};
+        for (const [surfaceId, value] of Object.entries(raw)) {
+          next[surfaceId] = parsePaneTokens(value);
+        }
+        setPaneTokens(next);
+      }).catch(() => {});
+    };
+    ask();
+    const id = setInterval(ask, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+    // Deps are the KEY, not `readable`: that array is a new object on every
+    // dwell-clock tick, and depending on it restarts the poll once a second.
+  }, [readableKey]);
 
   // Clamp rather than reset: an agent unblocking under the cursor should not
   // throw the user back to the top of a list they were reading.
@@ -184,6 +227,15 @@ export default function AgentNavigator({ onClose, onFocusAgent }: {
                 </span>
               )}
               <span className="agent-nav__row-workspace">{entry.workspaceTitle}</span>
+              {/* Tokens this agent's session has spent. Absent, not zero, when
+                  the tool could not read it — and `title` carries the reason,
+                  because a blank cell in a list of numbers reads as "none". */}
+              <span
+                className="agent-nav__row-tokens"
+                title={paneTokens[entry.surfaceId]?.error ?? undefined}
+              >
+                {formatTokens(paneTokens[entry.surfaceId]?.sessionTotal ?? null)}
+              </span>
               <span className="agent-nav__row-reason">
                 {entry.blockedReason ?? reasonFallback(entry, t)}
               </span>

@@ -94,7 +94,10 @@
 
 .agent-nav__row {
   display: grid;
-  grid-template-columns: 8px minmax(50px, auto) auto minmax(50px, auto) 1fr auto;
+  /* dot | label | kind? | workspace | tokens | reason | dwell.
+     The token column is `auto`, so it collapses to nothing on a row whose
+     agent the token tool cannot read rather than reserving a permanent gap. */
+  grid-template-columns: 8px minmax(50px, auto) auto minmax(50px, auto) auto 1fr auto;
   align-items: center;
   gap: 8px;
   width: 100%;
@@ -159,6 +162,15 @@
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+}
+
+/* Tokens this agent session has spent. Tabular figures so the column reads as
+   a column — the numbers are there to be compared against each other. */
+.agent-nav__row-tokens {
+  color: var(--ui-text-secondary);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .agent-nav__row-dwell {

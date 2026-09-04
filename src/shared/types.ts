@@ -762,6 +762,12 @@ export const IPC_CHANNELS = {
      a cold start. Mounting renderers ask through this channel instead of
      waiting to be told. */
   QUOTA_GET: 'quota:get',
+  /* Per-pane token counts. PULL, not push, and deliberately not part of the
+     quota family: quota is one account-wide number on a timer, while a token
+     count belongs to one agent session in one directory — and only the
+     renderer knows which panes have agents, because the split tree lives in
+     its store. So the renderer names the panes and asks. */
+  TOKEN_GET: 'token:get',
   ORCHESTRATION_CLEAR: 'orchestration:clear',
   // In-app release notes (issue #211). Distinct from the UPDATE_* family below:
   // that one answers "is there a newer version", this one answers "what changed",

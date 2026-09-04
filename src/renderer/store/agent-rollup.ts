@@ -117,6 +117,15 @@ export interface AgentRosterEntry {
   detectedState: AgentPresenceState | null;
   /** The agent's live metadata claims, null when absent or expired. */
   metadata: DeclaredAgentMetadata | null;
+  /**
+   * The pane's working directory, as last reported.
+   *
+   * Carried because the per-pane token tool locates an agent's transcript BY
+   * its cwd — it is the join key, not a label. Null until the shell reports
+   * one, which is a real state: a pane that has not said where it is cannot
+   * have its tokens looked up.
+   */
+  cwd: string | null;
 }
 
 export interface AgentCounts {
@@ -239,6 +248,7 @@ function rosterEntryFor(
     stateSource,
     detectedState,
     metadata: liveMetadata(declared?.metadata, now),
+    cwd: surface.currentCwd ?? null,
   };
 }
 

@@ -86,6 +86,12 @@ contextBridge.exposeInMainWorld('wmux', {
       return () => ipcRenderer.removeListener(IPC_CHANNELS.QUOTA_UPDATE, handler);
     },
   },
+  token: {
+    /** Token counts for the named panes, keyed by surfaceId. Pull-only: the
+        renderer is the side that knows which panes have agents. */
+    get: (panes: Array<{ surfaceId: string; kind: string; cwd: string }>) =>
+      ipcRenderer.invoke(IPC_CHANNELS.TOKEN_GET, panes) as Promise<Record<string, unknown>>,
+  },
   notification: {
     fire: (data: { surfaceId: string; text: string; title?: string }) =>
       ipcRenderer.send(IPC_CHANNELS.NOTIFICATION_FIRE, data),
