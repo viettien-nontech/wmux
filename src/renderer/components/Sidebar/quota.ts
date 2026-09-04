@@ -68,3 +68,15 @@ export function parseQuota(raw: unknown): QuotaState {
     })),
   };
 }
+
+/**
+ * "22:14" from a unix-seconds reset time — the same formatting quota.js's
+ * own `gio()` uses, so the sidebar and the Node tool never disagree about
+ * what a reset time looks like.
+ */
+export function formatResetTime(unixSeconds: number | null): string {
+  if (unixSeconds == null) return '';
+  const d = new Date(unixSeconds * 1000);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
+}

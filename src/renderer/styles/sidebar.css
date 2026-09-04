@@ -1427,18 +1427,22 @@
    one predicate is enough. */
 .quota-banner {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
+  row-gap: 2px;
+  column-gap: 4px;
   margin: 6px 8px;
   padding: 4px 8px;
   font-size: 10px;
   color: var(--ui-text-muted);
   font-variant-numeric: tabular-nums;
+  font-family: 'Cascadia Mono', Consolas, monospace;
 }
 
 .quota-banner__bay {
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
+  flex-wrap: wrap;
   gap: 3px;
 }
 
@@ -1448,7 +1452,16 @@
 }
 
 .quota-banner__label {
-  opacity: 0.8;
+  opacity: 0.9;
+  font-weight: 600;
+}
+
+.quota-banner__window {
+  opacity: 0.55;
+}
+
+.quota-banner__reset {
+  opacity: 0.55;
 }
 
 .quota-banner__pct--near {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseQuota, isNearLimit } from '../../src/renderer/components/Sidebar/quota';
+import { parseQuota, isNearLimit, formatResetTime } from '../../src/renderer/components/Sidebar/quota';
 
 // The sidebar shows one account-wide quota line, not one per pane: three Claude
 // panes still share a single 5-hour window, so repeating the number on every row
@@ -50,5 +50,20 @@ describe('isNearLimit', () => {
   it('an unmeasured window is not an alarm', () => {
     // Colouring null red would report a problem the numbers do not support.
     expect(isNearLimit(null)).toBe(false);
+  });
+});
+
+describe('formatResetTime', () => {
+  it('formats the same way quota.js\'s gio() does — vi-VN, hour:2-digit, minute:2-digit', () => {
+    // Computed the same way at test-run time rather than hardcoded, so this
+    // isn't flaky across machines in different timezones — quota.js's gio()
+    // also has no timeZone override, so both must track the RUNNING clock.
+    const ts = 1788439200;
+    const expected = new Date(ts * 1000).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
+    expect(formatResetTime(ts)).toBe(expected);
+  });
+
+  it('returns empty string when there is no reset time — never fabricates one', () => {
+    expect(formatResetTime(null)).toBe('');
   });
 });
