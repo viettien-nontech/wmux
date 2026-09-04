@@ -24,6 +24,23 @@ export interface QuotaBay {
   label: string;
   fiveHour: QuotaWindow;
   sevenDay: QuotaWindow;
+  /**
+   * How the tool's reading of THIS bay went: `ok`, or something else when the
+   * numbers are missing or no longer trustworthy.
+   *
+   * Absent from an older tool, so it defaults to `ok` — the two repos ship
+   * separately and a wmux with this field will meet a tool without it.
+   */
+  status: string;
+  /**
+   * Why the numbers are missing, in the tool's own words. Empty when there is
+   * nothing to explain.
+   *
+   * `?` was doing two jobs and hiding the difference: "no agent has ever run
+   * here" and "the reading expired" rendered identically. Carried rather than
+   * composed here, so the sidebar and the terminal never word it differently.
+   */
+  reason: string;
 }
 
 export interface QuotaState {
@@ -65,6 +82,8 @@ export function parseQuota(raw: unknown): QuotaState {
       label: String(b.nhan ?? ''),
       fiveHour: readWindow(b.five_hour),
       sevenDay: readWindow(b.seven_day),
+      status: typeof b.status === 'string' && b.status ? b.status : 'ok',
+      reason: typeof b.reason === 'string' ? b.reason : '',
     })),
   };
 }

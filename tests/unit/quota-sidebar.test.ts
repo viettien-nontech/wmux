@@ -67,3 +67,48 @@ describe('formatResetTime', () => {
     expect(formatResetTime(null)).toBe('');
   });
 });
+
+describe('parseQuota — why a bay has no numbers', () => {
+  // `?` was doing two jobs. "This agent has never run here" and "the reading
+  // expired" both rendered as `CX 5h ? Weekly ?`, and on 2026-09-04 that cost
+  // real time: Codex hit its usage limit, the collector said so in as many
+  // words (`status: stale`, with a reason), and the sidebar showed the same
+  // `?` it shows for an agent nobody has started. The tool always knew; the
+  // door it came through dropped the answer.
+  //
+  // Carried, never invented: the reason is the collector's own sentence.
+
+  it('keeps the status and reason a bay was given', () => {
+    const state = parseQuota({
+      bays: [{
+        id: 'codex', nhan: 'CX', five_hour: null, seven_day: null,
+        status: 'stale', reason: 'số đã hết hạn — chạy Codex một lượt là có số mới',
+      }],
+    });
+
+    expect(state.bays[0].status).toBe('stale');
+    expect(state.bays[0].reason).toMatch(/hết hạn/);
+    expect(state.bays[0].fiveHour.pct).toBeNull();
+  });
+
+  it('a bay that read fine is not made to explain itself', () => {
+    const state = parseQuota({
+      bays: [{ id: 'claude', nhan: 'CC', five_hour: { pct: 41 }, seven_day: { pct: 22 }, status: 'ok', reason: '' }],
+    });
+
+    expect(state.bays[0].status).toBe('ok');
+    expect(state.bays[0].reason).toBe('');
+  });
+
+  it('an older tool that sends neither field still renders', () => {
+    // The two repos ship separately, so a wmux with this change WILL meet a
+    // cockpit without it. Missing explanation must not cost the numbers.
+    const state = parseQuota({
+      bays: [{ id: 'claude', nhan: 'CC', five_hour: { pct: 41 }, seven_day: { pct: 22 } }],
+    });
+
+    expect(state.bays[0].fiveHour.pct).toBe(41);
+    expect(state.bays[0].status).toBe('ok');
+    expect(state.bays[0].reason).toBe('');
+  });
+});

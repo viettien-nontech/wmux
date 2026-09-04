@@ -44,7 +44,7 @@ export default function QuotaBanner() {
   return (
     <div className="quota-banner">
       {quota.bays.map((bay) => (
-        <div key={bay.id} className="quota-banner__bay">
+        <div key={bay.id} className="quota-banner__bay" title={bay.reason || undefined}>
           <QuotaBayLine bay={bay} />
         </div>
       ))}
@@ -96,6 +96,14 @@ function QuotaBayLine({ bay }: { bay: QuotaBay }) {
       {reset && <span className="quota-banner__reset">→{reset}</span>}
       <span className="quota-banner__window">Weekly</span>
       <Pct value={bay.sevenDay.pct} />
+      {/* Only when there is nothing to show AND a reason why. `?` on its own
+          reads the same for "no agent has ever run here" as for "the reading
+          expired" — one is nothing to act on, the other means the numbers on
+          screen are no longer true. The word is short because the row is
+          narrow; the tool's full sentence is the row's tooltip. */}
+      {bay.status !== 'ok' && bay.fiveHour.pct == null && bay.sevenDay.pct == null && (
+        <span className="quota-banner__stale">{bay.status === 'stale' ? 'cũ' : bay.status}</span>
+      )}
     </>
   );
 }

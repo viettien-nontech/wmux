@@ -1469,6 +1469,14 @@
   font-weight: 700;
 }
 
+/* Why a bay has no numbers, in one word. Deliberately NOT coloured: colour in
+   this row means "at the threshold" and nothing else, and a second meaning for
+   it would make the one alarm that matters ambiguous. */
+.quota-banner__stale {
+  color: var(--ui-text-muted);
+  font-style: italic;
+}
+
 /* Waiting for the first measurement. Dimmed rather than absent so the
    workspace list does not shift down when the numbers arrive. */
 .quota-banner--pending {
