@@ -6,6 +6,7 @@ import WorkspaceContextMenu from './WorkspaceContextMenu';
 import SessionMenu from './SessionMenu';
 import OrchestrationPanel from './OrchestrationPanel';
 import AgentRosterBanner from './AgentRosterBanner';
+import QuotaBanner from './QuotaBanner';
 import type { AgentRosterEntry } from '../../store/agent-rollup';
 import { DropEdge, edgeForPointer, reorderByDrop } from './reorder';
 import ErrorBoundary from '../ErrorBoundary';
@@ -273,6 +274,10 @@ export default function Sidebar({
 
       <ErrorBoundary label="agent-roster" silent>
         <AgentRosterBanner onFocusAgent={onFocusAgent} onOpenNavigator={onOpenAgentNavigator} />
+      </ErrorBoundary>
+
+      <ErrorBoundary label="quota-banner" silent>
+        <QuotaBanner />
       </ErrorBoundary>
 
       <ErrorBoundary label="orchestration" silent>
