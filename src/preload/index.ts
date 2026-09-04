@@ -76,6 +76,13 @@ contextBridge.exposeInMainWorld('wmux', {
       return () => ipcRenderer.removeListener(IPC_CHANNELS.METADATA_UPDATE, handler);
     },
   },
+  quota: {
+    onUpdate: (callback: (raw: unknown) => void) => {
+      const handler = (_event: any, raw: unknown) => callback(raw);
+      ipcRenderer.on(IPC_CHANNELS.QUOTA_UPDATE, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.QUOTA_UPDATE, handler);
+    },
+  },
   notification: {
     fire: (data: { surfaceId: string; text: string; title?: string }) =>
       ipcRenderer.send(IPC_CHANNELS.NOTIFICATION_FIRE, data),

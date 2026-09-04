@@ -724,6 +724,13 @@ export default function App() {
     return unsub;
   }, [setAgentMeta]);
 
+  // Push account-wide agent quota from the main process into the store.
+  const setQuotaRaw = useStore((s) => s.setQuotaRaw);
+  useEffect(() => {
+    if (!window.wmux?.quota?.onUpdate) return;
+    return window.wmux.quota.onUpdate((raw: unknown) => setQuotaRaw(raw));
+  }, [setQuotaRaw]);
+
   // Listen for real-time metadata updates from shell integration (pipe server → IPC → here)
   useEffect(() => {
     if (!window.wmux?.metadata?.onUpdate) return;

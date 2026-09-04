@@ -1,3 +1,4 @@
+import os from 'os';
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import { registerIpcHandlers, agentManager, ptyManager, setupAgentPtyForwarding, reapOrphanedPtys, sshDetector, agentIdentity } from './ipc-handlers';
 import { sequenceFrom, splitSequencedReport } from './ssh-detect';
@@ -44,6 +45,7 @@ import { directoryFromArgv } from './shell-context-menu';
 import { reportExplorerCwd } from './explorer-roots';
 import { ensurePowerShellShim } from './powershell-shim';
 import { loadSettings } from './settings-store';
+import { resolveQuotaTool, startQuotaPoller } from './quota-poller';
 import fs from 'fs';
 import path from 'path';
 
@@ -1097,6 +1099,18 @@ app.whenReady().then(() => {
 
   // Watch TMPDIR for wmux-orchestrator runs and push state to the sidebar.
   startOrchestrationWatcher();
+
+  // Push account-wide agent quota to the sidebar (branch: quota-sidebar).
+  // One account has one 5-hour window no matter how many panes are open, so
+  // this is a single poller pushed to every window, not a per-surface thing.
+  startQuotaPoller({
+    toolPath: resolveQuotaTool(loadSettings(), os.homedir()),
+    onUpdate: (raw) => {
+      BrowserWindow.getAllWindows().forEach((win) => {
+        if (!win.isDestroyed()) win.webContents.send(IPC_CHANNELS.QUOTA_UPDATE, raw);
+      });
+    },
+  });
 
   portScanner.onResults((portsByPid) => {
     BrowserWindow.getAllWindows().forEach(win => {

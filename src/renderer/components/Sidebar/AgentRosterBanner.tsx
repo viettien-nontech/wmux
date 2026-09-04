@@ -3,6 +3,7 @@ import { useStore } from '../../store';
 import { useT } from '../../i18n';
 import { rollupAgents } from '../../store/agent-rollup';
 import type { AgentRosterEntry } from '../../store/agent-rollup';
+import { isNearLimit, QuotaState } from './quota';
 
 /**
  * "Who needs me?", answered above the workspace list.
@@ -25,6 +26,7 @@ export default function AgentRosterBanner({ onFocusAgent, onOpenNavigator }: {
   const agentStates = useStore((s) => s.agentStates);
   const agentIdentities = useStore((s) => s.agentIdentities);
   const agentDetections = useStore((s) => s.agentDetections);
+  const quota = useStore((s) => s.quota);
   const [now, setNow] = useState(() => Date.now());
 
   const rollup = useMemo(
@@ -48,6 +50,7 @@ export default function AgentRosterBanner({ onFocusAgent, onOpenNavigator }: {
   const oldest = rollup.blocked[0];
 
   return (
+    <>
     <div className="agent-roster" data-blocked={blocked > 0}>
       <button
         className="agent-roster__main"
@@ -83,6 +86,8 @@ export default function AgentRosterBanner({ onFocusAgent, onOpenNavigator }: {
         </svg>
       </button>
     </div>
+      {quota && <QuotaRow quota={quota} t={t} />}
+    </>
   );
 }
 
@@ -101,3 +106,38 @@ export function formatDwell(ms: number): string {
   const hours = Math.floor(minutes / 60);
   return `${hours}h${String(minutes % 60).padStart(2, '0')}`;
 }
+
+/**
+ * The account's remaining quota, one compact line under the roster row.
+ *
+ * One line for the whole window, not one per pane — three Claude panes share
+ * a single 5-hour window, so a per-row number would just be three chances to
+ * disagree with itself. `quota` is already parsed (parseQuota ran in the
+ * store); this only decides how to draw it.
+ */
+function QuotaRow({ quota, t }: { quota: QuotaState; t: ReturnType<typeof useT> }) {
+  if (quota.error) {
+    return (
+      <div className="agent-roster__quota" title={quota.error}>
+        {t('agentRoster.quotaUnknown', 'quota ?')}
+      </div>
+    );
+  }
+
+  if (quota.bays.length === 0) return null;
+
+  return (
+    <div className="agent-roster__quota">
+      {quota.bays.map((bay, i) => (
+        <span key={bay.id} className="agent-roster__quota-bay">
+          {i > 0 && <span className="agent-roster__quota-sep">·</span>}
+          <span className="agent-roster__quota-label">{bay.label}</span>
+          <span className={isNearLimit(bay.fiveHour.pct) ? 'agent-roster__quota-pct agent-roster__quota-pct--near' : 'agent-roster__quota-pct'}>
+            {bay.fiveHour.pct != null ? `${bay.fiveHour.pct}%` : '?'}
+          </span>
+        </span>
+      ))}
+    </div>
+  );
+}
+

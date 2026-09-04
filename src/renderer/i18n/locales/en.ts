@@ -727,6 +727,7 @@ export const en = {
   'agentRoster.jumpHint': 'Go to the agent waiting longest — {label}',
   'agentRoster.noneBlocked': 'No agent is waiting on you',
   'agentRoster.openNavigator': 'All agents (Ctrl+Shift+A)',
+  'agentRoster.quotaUnknown': 'quota ?',
   'agentNavigator.title': 'Agents',
   'agentNavigator.filterAll': 'all',
   'agentNavigator.filterBlocked': 'blocked',

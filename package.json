@@ -57,5 +57,9 @@
     "vite": "8.1.0",
     "vitest": "4.1.9",
     "wait-on": "9.0.10"
+  },
+  "allowScripts": {
+    "electron-winstaller@5.4.0": true,
+    "node-pty@1.1.0": true
   }
 }

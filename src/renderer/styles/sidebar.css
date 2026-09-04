@@ -1417,3 +1417,38 @@
   background: rgba(var(--ui-overlay-rgb), 0.08);
   color: var(--ui-text-primary);
 }
+
+/* Account-wide quota, one line under the roster row. Coloured by VALUE, not by
+   token name — the previous host (Herdr) could only colour by token name, so
+   the 80%-threshold trick needed two differently-named tokens published in
+   turn. React renders per pixel, so one predicate is enough. */
+.agent-roster__quota {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 8px 6px 8px;
+  padding: 4px 8px;
+  font-size: 10px;
+  color: var(--ui-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-roster__quota-bay {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.agent-roster__quota-sep {
+  margin-right: 3px;
+  color: var(--ui-text-muted);
+}
+
+.agent-roster__quota-label {
+  opacity: 0.8;
+}
+
+.agent-roster__quota-pct--near {
+  color: #ef4444;
+  font-weight: 600;
+}

@@ -753,6 +753,9 @@ export const IPC_CHANNELS = {
   EXPLORER_OPEN_IN_APP: 'explorer:open-in-app',
   // Orchestration (wmux-orchestrator plugin state broadcast)
   ORCHESTRATION_UPDATE: 'orchestration:update',
+  /* Account-wide agent quota, pushed on a timer. Not surface-scoped: one
+     account has one window no matter how many panes are open. */
+  QUOTA_UPDATE: 'quota:update',
   ORCHESTRATION_CLEAR: 'orchestration:clear',
   // In-app release notes (issue #211). Distinct from the UPDATE_* family below:
   // that one answers "is there a newer version", this one answers "what changed",
