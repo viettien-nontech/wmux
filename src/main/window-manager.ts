@@ -248,7 +248,12 @@ export class WindowManager {
     if (isDev) {
       const devPort = process.env.VITE_DEV_PORT || '5199';
       win.loadURL(`http://localhost:${devPort}`);
-      win.webContents.openDevTools({ mode: 'detach' });
+      // Was unconditional — a detached DevTools window popped up on every
+      // single `npm run dev`, whether or not anyone was about to use it.
+      // Opt in with WMUX_OPEN_DEVTOOLS=1 when actually debugging the renderer.
+      if (process.env.WMUX_OPEN_DEVTOOLS === '1') {
+        win.webContents.openDevTools({ mode: 'detach' });
+      }
     } else {
       win.loadFile(path.join(__dirname, '../renderer/index.html'));
     }

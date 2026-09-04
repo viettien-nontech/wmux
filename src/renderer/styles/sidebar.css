@@ -1427,44 +1427,44 @@
    one predicate is enough. */
 .quota-banner {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  row-gap: 2px;
-  column-gap: 4px;
+  flex-direction: column;
+  gap: 3px;
   margin: 6px 8px;
-  padding: 4px 8px;
-  font-size: 10px;
-  color: var(--ui-text-muted);
+  padding: 6px 8px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   font-family: 'Cascadia Mono', Consolas, monospace;
 }
 
+/* One row per bay. A wrapped single line used to leave the "·" separator
+   stranded at the start of the second line with nothing to its left — the
+   line break itself is the separator now, so there is nothing left to strand. */
 .quota-banner__bay {
-  display: inline-flex;
+  display: flex;
   align-items: baseline;
   flex-wrap: wrap;
-  gap: 3px;
-}
-
-.quota-banner__sep {
-  margin-right: 3px;
-  color: var(--ui-text-muted);
+  gap: 5px;
 }
 
 .quota-banner__label {
-  opacity: 0.9;
-  font-weight: 600;
+  color: var(--ui-text-primary);
+  font-weight: 700;
 }
 
 .quota-banner__window {
-  opacity: 0.55;
+  color: var(--ui-text-secondary);
+}
+
+.quota-banner__pct {
+  color: var(--ui-text-primary);
+  font-weight: 600;
 }
 
 .quota-banner__reset {
-  opacity: 0.55;
+  color: var(--ui-text-secondary);
 }
 
 .quota-banner__pct--near {
   color: #ef4444;
-  font-weight: 600;
+  font-weight: 700;
 }

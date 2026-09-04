@@ -43,11 +43,10 @@ export default function QuotaBanner() {
 
   return (
     <div className="quota-banner">
-      {quota.bays.map((bay, i) => (
-        <span key={bay.id} className="quota-banner__bay">
-          {i > 0 && <span className="quota-banner__sep">·</span>}
+      {quota.bays.map((bay) => (
+        <div key={bay.id} className="quota-banner__bay">
           <QuotaBayLine bay={bay} />
-        </span>
+        </div>
       ))}
     </div>
   );
