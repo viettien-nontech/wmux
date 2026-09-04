@@ -29,7 +29,7 @@ export default function QuotaBanner() {
   const quota = useStore((s) => s.quota);
   const t = useT();
 
-  if (!quota) return null;
+  if (!quota) return <QuotaSkeleton />;
 
   if (quota.error) {
     return (
@@ -46,6 +46,32 @@ export default function QuotaBanner() {
       {quota.bays.map((bay) => (
         <div key={bay.id} className="quota-banner__bay">
           <QuotaBayLine bay={bay} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Holds the row's place while the first measurement is on its way.
+ *
+ * Not a number and not pretending to be one: dimmed labels and dashes, so the
+ * workspace list below does not jump down a row the moment the real figures
+ * land. The two labels are the two bays this build reads; they are a shape,
+ * replaced wholesale by whatever the tool actually reports, so a machine with
+ * only one agent sees the placeholder for the fraction of a second before the
+ * answer arrives and then sees the truth.
+ */
+function QuotaSkeleton() {
+  return (
+    <div className="quota-banner quota-banner--pending" aria-hidden="true">
+      {['CC', 'CX'].map((label) => (
+        <div key={label} className="quota-banner__bay">
+          <span className="quota-banner__label">{label}</span>
+          <span className="quota-banner__window">5h</span>
+          <span className="quota-banner__pct">—</span>
+          <span className="quota-banner__window">Weekly</span>
+          <span className="quota-banner__pct">—</span>
         </div>
       ))}
     </div>

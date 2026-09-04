@@ -756,6 +756,12 @@ export const IPC_CHANNELS = {
   /* Account-wide agent quota, pushed on a timer. Not surface-scoped: one
      account has one window no matter how many panes are open. */
   QUOTA_UPDATE: 'quota:update',
+  /* Pull the latest quota result on demand. The push above fires its first tick
+     during app start, before any renderer has subscribed, so a window that
+     mounts afterwards would sit blank until the next tick — measured at 32s on
+     a cold start. Mounting renderers ask through this channel instead of
+     waiting to be told. */
+  QUOTA_GET: 'quota:get',
   ORCHESTRATION_CLEAR: 'orchestration:clear',
   // In-app release notes (issue #211). Distinct from the UPDATE_* family below:
   // that one answers "is there a newer version", this one answers "what changed",

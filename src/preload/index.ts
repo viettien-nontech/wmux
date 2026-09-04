@@ -77,6 +77,9 @@ contextBridge.exposeInMainWorld('wmux', {
     },
   },
   quota: {
+    /** What the poller last saw. Asked for on mount, because the first push
+        happens during app start with nobody listening yet. */
+    get: () => ipcRenderer.invoke(IPC_CHANNELS.QUOTA_GET),
     onUpdate: (callback: (raw: unknown) => void) => {
       const handler = (_event: any, raw: unknown) => callback(raw);
       ipcRenderer.on(IPC_CHANNELS.QUOTA_UPDATE, handler);

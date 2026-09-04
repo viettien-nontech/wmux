@@ -1103,7 +1103,7 @@ app.whenReady().then(() => {
   // Push account-wide agent quota to the sidebar (branch: quota-sidebar).
   // One account has one 5-hour window no matter how many panes are open, so
   // this is a single poller pushed to every window, not a per-surface thing.
-  startQuotaPoller({
+  const quotaPoller = startQuotaPoller({
     toolPath: resolveQuotaTool(loadSettings(), os.homedir()),
     onUpdate: (raw) => {
       BrowserWindow.getAllWindows().forEach((win) => {
@@ -1111,6 +1111,9 @@ app.whenReady().then(() => {
       });
     },
   });
+  // The push above cannot reach a renderer that has not mounted yet, and the
+  // first tick always beats it there. Let whoever mounts ask for what it missed.
+  ipcMain.handle(IPC_CHANNELS.QUOTA_GET, () => quotaPoller.last());
 
   portScanner.onResults((portsByPid) => {
     BrowserWindow.getAllWindows().forEach(win => {

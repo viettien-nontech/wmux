@@ -727,6 +727,13 @@ export default function App() {
   // Push account-wide agent quota from the main process into the store.
   const setQuotaRaw = useStore((s) => s.setQuotaRaw);
   useEffect(() => {
+    // Ask first, then listen. The poller's first tick runs while the app is
+    // still starting and its push lands on a window that has not mounted this
+    // effect yet; waiting to be told left the sidebar blank for a full 30s
+    // interval. Anything already measured is here for the asking.
+    window.wmux?.quota?.get?.().then((raw: unknown) => {
+      if (raw != null) setQuotaRaw(raw);
+    }).catch(() => {});
     if (!window.wmux?.quota?.onUpdate) return;
     return window.wmux.quota.onUpdate((raw: unknown) => setQuotaRaw(raw));
   }, [setQuotaRaw]);

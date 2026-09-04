@@ -1468,3 +1468,9 @@
   color: #ef4444;
   font-weight: 700;
 }
+
+/* Waiting for the first measurement. Dimmed rather than absent so the
+   workspace list does not shift down when the numbers arrive. */
+.quota-banner--pending {
+  opacity: 0.32;
+}
