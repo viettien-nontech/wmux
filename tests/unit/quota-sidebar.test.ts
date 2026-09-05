@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { parseQuota, isNearLimit, formatResetTime } from '../../src/renderer/components/Sidebar/quota';
+import { parseQuota, isNearLimit, formatResetTime, staleBadge } from '../../src/renderer/components/Sidebar/quota';
+import type { QuotaBay } from '../../src/renderer/components/Sidebar/quota';
 
 // The sidebar shows one account-wide quota line, not one per pane: three Claude
 // panes still share a single 5-hour window, so repeating the number on every row
@@ -110,5 +111,78 @@ describe('parseQuota — why a bay has no numbers', () => {
     expect(state.bays[0].fiveHour.pct).toBe(41);
     expect(state.bays[0].status).toBe('ok');
     expect(state.bays[0].reason).toBe('');
+  });
+});
+
+/* ── The badge only appeared when BOTH windows were missing ──────────────
+ *
+ * Measured 2026-09-05. The tool reported, for Codex:
+ *
+ *   five_hour: null, seven_day: { pct: 18 }, status: "ok",
+ *   reason: "số 5h đã hết hạn · bỏ qua bản mới hơn (premium)"
+ *
+ * Every other surface the same tool feeds — `quota.js --tho`, `--mot-dong`,
+ * the TUI frame, both boards — printed `5h ? · Weekly 18% · <reason>`. The
+ * sidebar printed a bare `5h ?`, because the badge was gated on BOTH windows
+ * being empty. The reason was still there as the row's tooltip, so nothing
+ * was wrong on screen — there was just less of it than everywhere else, and
+ * only on hover.
+ *
+ * Half a reading is the normal shape for Codex, not an edge case: the 5h
+ * window expires while the weekly one is still good.
+ */
+describe('staleBadge', () => {
+  const bay = (over: Partial<QuotaBay>): QuotaBay => ({
+    id: 'codex', label: 'CX',
+    fiveHour: { pct: null, resetsAt: null },
+    sevenDay: { pct: null, resetsAt: null },
+    status: 'ok', reason: '',
+    ...over,
+  });
+
+  it('names the missing window when only one reading is gone', () => {
+    expect(staleBadge(bay({
+      sevenDay: { pct: 18, resetsAt: 1789009987 },
+      status: 'ok',
+      reason: 'số 5h đã hết hạn · bỏ qua bản mới hơn (premium)',
+    }))).toBe('5h cũ');
+  });
+
+  it('names the weekly window when that is the one missing', () => {
+    expect(staleBadge(bay({
+      fiveHour: { pct: 43, resetsAt: 1788598800 },
+      status: 'ok',
+      reason: 'số Weekly đã hết hạn',
+    }))).toBe('Weekly cũ');
+  });
+
+  it('keeps the plain word when the whole reading is gone', () => {
+    /* Unchanged behaviour: naming both windows in a row this narrow buys
+       nothing — there is no number left to qualify. */
+    expect(staleBadge(bay({
+      status: 'stale',
+      reason: 'số đã hết hạn — chạy Codex một lượt là có số mới',
+    }))).toBe('cũ');
+  });
+
+  it('shows the tool\'s own word for a status it does not know', () => {
+    expect(staleBadge(bay({ status: 'missing', reason: 'không có thư mục phiên Codex' })))
+      .toBe('missing');
+  });
+
+  it('says nothing when both readings are there', () => {
+    expect(staleBadge(bay({
+      fiveHour: { pct: 43, resetsAt: 1 }, sevenDay: { pct: 22, resetsAt: 2 },
+      status: 'ok', reason: '',
+    }))).toBeNull();
+  });
+
+  it('stays quiet on a half reading it cannot explain', () => {
+    /* An older tool sends no `reason`. A missing number with no explanation
+       may simply never have been measured; calling it `cũ` would be inventing
+       a cause the tool never claimed. */
+    expect(staleBadge(bay({
+      sevenDay: { pct: 18, resetsAt: 1 }, status: 'ok', reason: '',
+    }))).toBeNull();
   });
 });

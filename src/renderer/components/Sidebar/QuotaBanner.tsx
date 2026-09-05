@@ -1,6 +1,6 @@
 import { useStore } from '../../store';
 import { useT } from '../../i18n';
-import { isNearLimit, formatResetTime, type QuotaBay } from './quota';
+import { isNearLimit, formatResetTime, staleBadge, type QuotaBay } from './quota';
 
 /**
  * The account's remaining quota, always visible above the workspace list.
@@ -88,6 +88,7 @@ function Pct({ value }: { value: number | null }) {
 
 function QuotaBayLine({ bay }: { bay: QuotaBay }) {
   const reset = formatResetTime(bay.fiveHour.resetsAt);
+  const badge = staleBadge(bay);
   return (
     <>
       <span className="quota-banner__label">{bay.label}</span>
@@ -96,14 +97,15 @@ function QuotaBayLine({ bay }: { bay: QuotaBay }) {
       {reset && <span className="quota-banner__reset">→{reset}</span>}
       <span className="quota-banner__window">Weekly</span>
       <Pct value={bay.sevenDay.pct} />
-      {/* Only when there is nothing to show AND a reason why. `?` on its own
-          reads the same for "no agent has ever run here" as for "the reading
-          expired" — one is nothing to act on, the other means the numbers on
-          screen are no longer true. The word is short because the row is
-          narrow; the tool's full sentence is the row's tooltip. */}
-      {bay.status !== 'ok' && bay.fiveHour.pct == null && bay.sevenDay.pct == null && (
-        <span className="quota-banner__stale">{bay.status === 'stale' ? 'cũ' : bay.status}</span>
-      )}
+      {/* `?` on its own reads the same for "no agent has ever run here" as for
+          "the reading expired" — one is nothing to act on, the other means the
+          numbers on screen are no longer true. The word is short because the
+          row is narrow; the tool's full sentence is the row's tooltip.
+
+          Which window it applies to is decided in `staleBadge`, next to the
+          data, so this row and the terminal never disagree about when a bay is
+          worth flagging. */}
+      {badge && <span className="quota-banner__stale">{badge}</span>}
     </>
   );
 }

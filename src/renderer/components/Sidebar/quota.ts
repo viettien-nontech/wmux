@@ -62,6 +62,37 @@ export function isNearLimit(pct: number | null): boolean {
   return pct != null && pct >= 80;
 }
 
+/**
+ * The short word next to a bay when part of its reading is missing, or `null`
+ * when there is nothing to flag.
+ *
+ * Half a reading is Codex's normal shape, not an edge case: the 5-hour window
+ * expires while the weekly one is still good. The banner used to flag a bay
+ * only when BOTH windows were empty, so on 2026-09-05 it showed a bare `5h ?`
+ * while every other surface the same tool feeds — two terminal renderings, the
+ * TUI frame, both boards — printed `5h ? · Weekly 18% · <reason>`. Nothing on
+ * screen was false; there was just less of it here, and only on hover.
+ *
+ * Silent without a `reason`. A missing number with no explanation may simply
+ * never have been measured, and calling that stale would invent a cause the
+ * tool never claimed.
+ */
+export function staleBadge(bay: QuotaBay): string | null {
+  const missing = [
+    bay.fiveHour.pct == null ? '5h' : null,
+    bay.sevenDay.pct == null ? 'Weekly' : null,
+  ].filter((w): w is string => w !== null);
+
+  if (missing.length === 0) return null;
+  if (bay.status === 'ok' && !bay.reason) return null;
+
+  /* Both gone: naming the windows buys nothing in a row this narrow, because
+     no number is left for the name to qualify. Unchanged from before. */
+  if (missing.length === 2) return bay.status === 'stale' ? 'cũ' : bay.status;
+
+  return `${missing[0]} cũ`;
+}
+
 /** Read one window off the tool's JSON, keeping "not measured" distinct from 0. */
 function readWindow(raw: unknown): QuotaWindow {
   const w = (raw ?? {}) as Record<string, unknown>;
