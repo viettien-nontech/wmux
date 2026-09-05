@@ -129,3 +129,68 @@ describe('formatTokens', () => {
     expect(formatTokens(null)).toBe('');
   });
 });
+
+describe('planReads — the session id, when there is one', () => {
+  // The tool finds a session by working directory, so two panes open on one
+  // folder read the same file and show the same number — wrong for at least
+  // one of them. An agent that reports its session id (`wmux report-session`)
+  // gives wmux a more precise key. It is an ADDITIONAL key, never a
+  // replacement: the id exists only when the agent volunteers it, so a pane
+  // without one has to keep working exactly as it does today.
+
+  it('separates two panes in one folder when they report different sessions', () => {
+    const reads = planReads([
+      { surfaceId: 'surf-a', kind: 'claude', cwd: 'C:/repo', sessionId: 'aaaa-1111' },
+      { surfaceId: 'surf-b', kind: 'claude', cwd: 'C:/repo', sessionId: 'bbbb-2222' },
+    ]);
+
+    expect(reads).toHaveLength(2);
+    expect(reads.map((r) => r.surfaceIds)).toEqual([['surf-a'], ['surf-b']]);
+  });
+
+  it('still shares one read between panes that report the SAME session', () => {
+    // Two tabs on one agent session are one session. Reading twice would spend
+    // two spawns to produce one number, and could produce two if a turn landed
+    // between them.
+    const reads = planReads([
+      { surfaceId: 'surf-a', kind: 'claude', cwd: 'C:/repo', sessionId: 'aaaa-1111' },
+      { surfaceId: 'surf-b', kind: 'claude', cwd: 'C:/repo', sessionId: 'aaaa-1111' },
+    ]);
+
+    expect(reads).toHaveLength(1);
+    expect(reads[0].surfaceIds).toEqual(['surf-a', 'surf-b']);
+  });
+
+  it('does not merge a pane that has an id with one that has none', () => {
+    // They are not known to be the same session — one is identified and the
+    // other is a guess by directory. Merging them would hand the identified
+    // pane's number to a pane nothing established a link to.
+    const reads = planReads([
+      { surfaceId: 'surf-a', kind: 'claude', cwd: 'C:/repo', sessionId: 'aaaa-1111' },
+      { surfaceId: 'surf-b', kind: 'claude', cwd: 'C:/repo' },
+    ]);
+
+    expect(reads).toHaveLength(2);
+  });
+
+  it('treats an empty or whitespace id as no id at all', () => {
+    // A report can arrive blank. "" must mean "not reported", not "a session
+    // whose id is the empty string", or one blank pane splits off on its own.
+    const reads = planReads([
+      { surfaceId: 'surf-a', kind: 'claude', cwd: 'C:/repo', sessionId: '' },
+      { surfaceId: 'surf-b', kind: 'claude', cwd: 'C:/repo', sessionId: '   ' },
+      { surfaceId: 'surf-c', kind: 'claude', cwd: 'C:/repo' },
+    ]);
+
+    expect(reads).toHaveLength(1);
+    expect(reads[0].surfaceIds).toEqual(['surf-a', 'surf-b', 'surf-c']);
+    expect(reads[0].sessionId).toBeUndefined();
+  });
+
+  it('carries the id through to the read, so the caller can pass --session', () => {
+    const reads = planReads([
+      { surfaceId: 'surf-a', kind: 'codex', cwd: 'C:/repo', sessionId: 'cccc-3333' },
+    ]);
+    expect(reads[0].sessionId).toBe('cccc-3333');
+  });
+});

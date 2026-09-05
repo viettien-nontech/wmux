@@ -101,10 +101,22 @@ export default function AgentNavigator({ onClose, onFocusAgent }: {
   const readable = useMemo(
     () => ordered
       .filter((e): e is AgentRosterEntry & { kind: string; cwd: string } => !!e.kind && !!e.cwd)
-      .map((e) => ({ surfaceId: e.surfaceId, kind: e.kind, cwd: e.cwd })),
+      .map((e) => ({
+        surfaceId: e.surfaceId,
+        kind: e.kind,
+        cwd: e.cwd,
+        // Only when the agent reported one. Sending null would be a key the
+        // tool cannot use; omitting it keeps the cwd-only path intact.
+        ...(e.sessionId ? { sessionId: e.sessionId } : {}),
+      })),
     [ordered],
   );
-  const readableKey = readable.map((p) => `${p.surfaceId} ${p.kind} ${p.cwd}`).join('|');
+  // The session id is part of the key: an agent that reports its id partway
+  // through is exactly the moment the number stops being a guess by directory,
+  // so the poll has to restart then rather than at the next pane change.
+  const readableKey = readable
+    .map((p) => `${p.surfaceId} ${p.kind} ${p.cwd} ${p.sessionId ?? ''}`)
+    .join('|');
 
   useEffect(() => {
     if (readable.length === 0) { setPaneTokens({}); return; }

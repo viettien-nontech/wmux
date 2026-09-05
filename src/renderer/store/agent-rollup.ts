@@ -83,6 +83,16 @@ export interface DeclaredAgentSnapshot {
   blockedSince?: number | null;
   /** Model / token / context claims, if the agent reported any. */
   metadata?: DeclaredAgentMetadata;
+  /**
+   * The agent's own session id (`wmux report-session`), when it reported one.
+   *
+   * Main has always sent this on the state channel and the store has always
+   * kept the whole payload; it was simply never declared here, so nothing
+   * downstream could see it. It is the join key the per-pane token reader
+   * needs: without it two panes on one folder are indistinguishable to the
+   * tool and get handed the same number.
+   */
+  sessionId?: string | null;
 }
 
 export interface AgentRosterEntry {
@@ -126,6 +136,13 @@ export interface AgentRosterEntry {
    * have its tokens looked up.
    */
   cwd: string | null;
+  /**
+   * The agent's declared session id, or null when it never reported one.
+   *
+   * Paired with `cwd` rather than replacing it: the id is the precise key, but
+   * it exists only when the agent volunteers it, so `cwd` stays the fallback.
+   */
+  sessionId: string | null;
 }
 
 export interface AgentCounts {
@@ -249,6 +266,7 @@ function rosterEntryFor(
     detectedState,
     metadata: liveMetadata(declared?.metadata, now),
     cwd: surface.currentCwd ?? null,
+    sessionId: declared?.sessionId ?? null,
   };
 }
 
