@@ -34,11 +34,40 @@ const t = (over: Partial<Transport> = {}): Transport => ({
 describe('usesNpiperelay', () => {
   it('is true only for a Windows pipe path dialled from inside WSL', () => {
     expect(usesNpiperelay(t({ env: { WSL_DISTRO_NAME: 'Ubuntu' } }))).toBe(true);
-    expect(usesNpiperelay(t({ env: { WSLENV: 'PATH/l' } }))).toBe(true);
+    expect(usesNpiperelay(t({ env: { WSL_INTEROP: '/run/WSL/8_interop' } }))).toBe(true);
     // Native Windows: the pipe is dialled directly.
     expect(usesNpiperelay(t({ env: {} }))).toBe(false);
     // A POSIX socket path is not a Windows pipe, whatever the environment says.
     expect(usesNpiperelay(t({ pipePath: '/tmp/wmux.sock', env: { WSL_DISTRO_NAME: 'Ubuntu' } }))).toBe(false);
+  });
+
+  it('is NOT fooled by WSLENV, which Windows Terminal sets on the Windows side', () => {
+    // Measured on a native Windows machine with no WSL installed at all:
+    //   WSLENV = "WT_SESSION:WT_PROFILE_ID:"
+    // WSLENV names which variables to FORWARD into a distro, so it is set by
+    // whoever is doing the forwarding — Windows Terminal, here — and says
+    // nothing about where this process is running. The CLI took the npiperelay
+    // branch on a machine that could dial the pipe directly, and every verb
+    // died with "npiperelay.exe not found".
+    //
+    // `WSL_DISTRO_NAME` and `WSL_INTEROP` are set INSIDE a distro, and interop
+    // is the thing npiperelay actually needs, so those two are the signal.
+    expect(usesNpiperelay(t({ env: { WSLENV: 'WT_SESSION:WT_PROFILE_ID:' } }))).toBe(false);
+    // Genuinely inside a distro, with WSLENV also present: still true, from the
+    // other two.
+    expect(usesNpiperelay(t({ env: { WSLENV: 'PATH/l', WSL_DISTRO_NAME: 'Ubuntu' } }))).toBe(true);
+  });
+
+  it('is the ONLY place the CLI decides this — no second spelling in wmux.ts', () => {
+    // The header above says a re-hardcoded literal is how this came back the
+    // first time, and it happened again in a place those tests did not look:
+    // `connectTransport` carried its own `WSL_DISTRO_NAME || WSLENV`, so the
+    // deadline logic and the transport CHOICE could disagree about the same
+    // machine. Reading the source is the only way to catch a duplicate that is
+    // correct in isolation.
+    const src = fs.readFileSync(path.join(__dirname, '../../src/cli/wmux.ts'), 'utf8');
+    expect(src).not.toMatch(/WSL_DISTRO_NAME\s*\|\|\s*process\.env\.WSLENV/);
+    expect(src).not.toMatch(/env\.WSLENV/);
   });
 
   it('is false when a remote target has taken over the transport', () => {

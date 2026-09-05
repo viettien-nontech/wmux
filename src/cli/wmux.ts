@@ -117,13 +117,20 @@ function parseRemoteTarget(spec: string): { host: string; port: number } {
 //     0. remoteTarget set (--remote / WMUX_REMOTE) → TCP (the devcontainer path,
 //        served by a `wmux bridge` reachable at host.docker.internal:9787)
 //     1. WMUX_PIPE starts with '/' → use as a Unix socket path
-//     2. WSL_DISTRO_NAME / WSLENV set → spawn npiperelay.exe automatically
+//     2. WSL_DISTRO_NAME / WSL_INTEROP set → spawn npiperelay.exe automatically
+//        (NOT WSLENV — Windows Terminal sets that on native Windows)
 //     3. native Windows → connect directly to the named pipe
 // ─────────────────────────────────────────────────────────────────────────────
 function connectTransport(onConnect: () => void): net.Socket | Duplex {
   if (remoteTarget) return net.connect({ host: remoteTarget.host, port: remoteTarget.port }, onConnect);
   if (PIPE_PATH.startsWith('/')) return net.connect({ path: PIPE_PATH }, onConnect);
-  if (process.env.WSL_DISTRO_NAME || process.env.WSLENV) return connectViaNpiperelay(PIPE_PATH, onConnect);
+  /* Through the shared derivation, not a second spelling of it. This line used
+     to carry its own `WSL_DISTRO_NAME || WSLENV`, which is how the transport
+     CHOICE and the deadline that assumes that choice could disagree about the
+     same machine — and did: `WSLENV` is set by Windows Terminal on native
+     Windows, so every verb took the relay branch and died with "npiperelay.exe
+     not found". See usesNpiperelay in transport-deadline.ts. */
+  if (usesNpiperelay()) return connectViaNpiperelay(PIPE_PATH, onConnect);
   return net.connect({ path: PIPE_PATH }, onConnect);
 }
 

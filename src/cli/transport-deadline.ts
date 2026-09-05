@@ -55,9 +55,22 @@ export interface Transport {
  * from inside a WSL distro cannot be dialled directly — npiperelay is what
  * bridges it, and spawning a Windows executable over interop is the slow part,
  * especially where AV scans the binary on each exec.
+ *
+ * **Not `WSLENV`.** That variable names which variables to FORWARD into a
+ * distro, so it is set by whoever is doing the forwarding — Windows Terminal
+ * sets it on the WINDOWS side, and a native Windows machine with no WSL
+ * installed carries `WSLENV=WT_SESSION:WT_PROFILE_ID:`. Reading it as "we are
+ * inside WSL" sent the CLI down the relay branch on a machine that could dial
+ * the pipe directly, and every verb died with "npiperelay.exe not found".
+ *
+ * `WSL_DISTRO_NAME` and `WSL_INTEROP` are set INSIDE a distro, and interop is
+ * the thing npiperelay actually needs — with interop off the relay could not
+ * run anyway, so the branch would be wrong even if we were in WSL. Same two
+ * signals `readWslEnvironment()` in wmux.ts already used.
  */
 export function usesNpiperelay(t: Transport): boolean {
-  return !t.remote && !t.pipePath.startsWith('/') && Boolean(t.env.WSL_DISTRO_NAME || t.env.WSLENV);
+  return !t.remote && !t.pipePath.startsWith('/')
+    && Boolean(t.env.WSL_DISTRO_NAME || t.env.WSL_INTEROP);
 }
 
 /** Whether this transport needs the floor at all. */

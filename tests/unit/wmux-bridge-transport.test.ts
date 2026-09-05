@@ -69,7 +69,14 @@ function roundTrip(port: number, payload: string): Promise<string> {
 
 describe('wmux bridge transport selection (WSL2 devcontainer path)', () => {
   const cleanups: Array<() => void> = [];
-  const isWslRuntime = Boolean(process.env.WSL_DISTRO_NAME || process.env.WSLENV);
+  /* NOT `WSLENV`. It names which variables to forward INTO a distro, so it is
+     set by whoever forwards — Windows Terminal sets it on native Windows, where
+     `WSLENV=WT_SESSION:WT_PROFILE_ID:` with no WSL installed at all. Reading it
+     as "we are in WSL" ran this whole WSL-only block on a Windows machine, and
+     four cases failed there permanently, as part of the noise floor everything
+     else then had to be measured against. Same mistake `usesNpiperelay` carried
+     — see transport-deadline.test.ts. */
+  const isWslRuntime = Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP);
 
   afterEach(() => {
     while (cleanups.length) cleanups.pop()!();
