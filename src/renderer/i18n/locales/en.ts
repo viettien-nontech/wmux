@@ -263,6 +263,10 @@ export const en = {
   'sidebar.saveSession': 'Save session',
   'sidebar.loadSession': 'Load session',
   'sidebar.newWorkspace': 'New workspace',
+  // Sidebar — the V-model review switch. One row for the whole app: the tool
+  // it controls reviews a pair of git repositories, not a pane.
+  'chuV.label': 'Review with a second AI',
+  'chuV.off': 'off',
   // Sidebar — session menu (save/load)
   'sessionMenu.justNow': 'just now',
   'sessionMenu.minutesAgo': '{count}m ago',

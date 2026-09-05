@@ -7,6 +7,7 @@ import SessionMenu from './SessionMenu';
 import OrchestrationPanel from './OrchestrationPanel';
 import AgentRosterBanner from './AgentRosterBanner';
 import QuotaBanner from './QuotaBanner';
+import ChuVToggle from './ChuVToggle';
 import type { AgentRosterEntry } from '../../store/agent-rollup';
 import { DropEdge, edgeForPointer, reorderByDrop } from './reorder';
 import ErrorBoundary from '../ErrorBoundary';
@@ -278,6 +279,10 @@ export default function Sidebar({
 
       <ErrorBoundary label="quota-banner" silent>
         <QuotaBanner />
+      </ErrorBoundary>
+
+      <ErrorBoundary label="chuv-toggle" silent>
+        <ChuVToggle />
       </ErrorBoundary>
 
       <ErrorBoundary label="orchestration" silent>

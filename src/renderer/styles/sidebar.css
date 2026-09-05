@@ -1482,3 +1482,37 @@
 .quota-banner--pending {
   opacity: 0.32;
 }
+
+/* ── công tắc chữ V ──────────────────────────────────────────
+   Cùng lề và cỡ chữ với `.quota-banner` ngay trên nó: hai dòng cùng nói về
+   "cả tài khoản", nên chúng phải đọc ra như một khối, không phải hai thứ rời. */
+.chuv-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 8px 6px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.chuv-toggle__label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: var(--text-dim, #8b8b8b);
+  user-select: none;
+}
+
+.chuv-toggle__box {
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent, #7aa2f7);
+}
+
+/* Tắt là trạng thái đáng nói thành lời: không màn nào khác cho thấy vòng soát
+   đã ngừng, mà một sự VẮNG MẶT thì không ai để ý. */
+.chuv-toggle__off {
+  color: var(--warn, #e0af68);
+  font-size: 11px;
+}
