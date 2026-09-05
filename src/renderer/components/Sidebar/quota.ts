@@ -50,16 +50,73 @@ export interface QuotaState {
 }
 
 /**
- * A window is "near limit" at 80% or more.
+ * The two numbers the whole quota signal turns on: colour the banner at `warn`,
+ * ring the bell at `warn` and again at `alert`.
+ */
+export interface QuotaThresholds {
+  /** Colour + first ring. */
+  warn: number;
+  /** Second ring, and the point where the wording stops being calm. */
+  alert: number;
+}
+
+/**
+ * What they were before anyone could change them, and still what they mean when
+ * a settings file says nothing.
+ *
+ * Stated once, here, because the same pair was written into three places by
+ * hand — this module, `quota-alerts.ts`, and cockpit's `statusline.js` — and
+ * the third had drifted to 90 with nobody noticing. Two of those now read this.
+ */
+export const DEFAULT_QUOTA_THRESHOLDS: QuotaThresholds = { warn: 80, alert: 95 };
+
+/**
+ * Turn whatever settings hold into a usable pair. Never throws, never refuses.
+ *
+ * `settings.json` has a second writer — a person with an editor — so these
+ * arrive as `unknown` far more often than the Settings inputs suggest. The
+ * repairs are deliberate rather than defensive:
+ *
+ * - **Per field**, so a garbled `warn` cannot also discard a good `alert`.
+ * - **Clamped to 1..100**, the range percentages live in. Above 100 is the one
+ *   that matters: a threshold no reading can reach is a bell that never rings
+ *   and never says why. The bottom of the range is honest rather than
+ *   protective — 1 really does mean "tell me about everything", and there is no
+ *   way to tell that apart from a typo, so it is taken at its word.
+ * - **Sorted, not rejected.** Once they are two numbers on a page, an inverted
+ *   pair is indistinguishable from a mistyped one, and the lower number is the
+ *   warning under either reading. There is no error state worth having here:
+ *   the alternative is a bell that stops working and says why in a file nobody
+ *   opens.
+ */
+export function quotaThresholds(warnPct: unknown, alertPct: unknown): QuotaThresholds {
+  const a = clampPct(warnPct, DEFAULT_QUOTA_THRESHOLDS.warn);
+  const b = clampPct(alertPct, DEFAULT_QUOTA_THRESHOLDS.alert);
+  return { warn: Math.min(a, b), alert: Math.max(a, b) };
+}
+
+function clampPct(value: unknown, fallback: number): number {
+  const n = typeof value === 'number' ? value : Number.NaN;
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(100, Math.max(1, Math.round(n)));
+}
+
+/**
+ * A window is "near limit" at `warn` percent or more.
  *
  * This lives here, as a function of the value, because it could not live
  * anywhere useful before: the previous host coloured cells by *token name*, so
  * the same threshold had to be faked by publishing two differently-named tokens
  * and deleting whichever one did not apply. A renderer that colours by value
  * needs one predicate and no bookkeeping.
+ *
+ * The threshold is an argument with a default rather than a required one, so
+ * that a caller which has not been given the user's setting keeps the old
+ * meaning instead of colouring on `undefined` — silently never, which looks
+ * exactly like a quiet account.
  */
-export function isNearLimit(pct: number | null): boolean {
-  return pct != null && pct >= 80;
+export function isNearLimit(pct: number | null, warn: number = DEFAULT_QUOTA_THRESHOLDS.warn): boolean {
+  return pct != null && pct >= warn;
 }
 
 /**

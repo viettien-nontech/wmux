@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseQuota, isNearLimit, formatResetTime, staleBadge } from '../../src/renderer/components/Sidebar/quota';
+import { parseQuota, isNearLimit, formatResetTime, staleBadge, quotaThresholds, DEFAULT_QUOTA_THRESHOLDS } from '../../src/renderer/components/Sidebar/quota';
 import type { QuotaBay } from '../../src/renderer/components/Sidebar/quota';
 
 // The sidebar shows one account-wide quota line, not one per pane: three Claude
@@ -184,5 +184,68 @@ describe('staleBadge', () => {
     expect(staleBadge(bay({
       sevenDay: { pct: 18, resetsAt: 1 }, status: 'ok', reason: '',
     }))).toBeNull();
+  });
+});
+
+// ─── the two thresholds, once they came out of the source ────────────────────
+//
+// 80 and 95 were written into three places (`isNearLimit`, the bell's
+// THRESHOLDS, and cockpit's statusline) before anybody could change them, and
+// the third one had drifted to 90 without anyone noticing. Moving them into
+// Settings only helps if the reading side can be handed a number it did not
+// choose — hence a sanitiser with no error state.
+
+describe('quotaThresholds', () => {
+  it('gives back the written-down defaults when nothing is set', () => {
+    expect(quotaThresholds(undefined, undefined)).toEqual(DEFAULT_QUOTA_THRESHOLDS);
+    expect(DEFAULT_QUOTA_THRESHOLDS).toEqual({ warn: 80, alert: 95 });
+  });
+
+  it('takes the numbers it is given', () => {
+    expect(quotaThresholds(50, 70)).toEqual({ warn: 50, alert: 70 });
+  });
+
+  it('reads an inverted pair as the pair it obviously is, rather than refusing', () => {
+    // settings.json has a second writer (a person with an editor), and the two
+    // fields are not distinguishable once they are two numbers on a page. The
+    // lower one warns; the higher one alerts. That is true either way round,
+    // so there is nothing here worth failing over.
+    expect(quotaThresholds(95, 80)).toEqual({ warn: 80, alert: 95 });
+  });
+
+  it('clamps into 1..100 and rounds, so a slip of the keyboard cannot mute the bell', () => {
+    // 0 would make every reading "crossed" forever; 900 would make none of them.
+    expect(quotaThresholds(0, 900)).toEqual({ warn: 1, alert: 100 });
+    expect(quotaThresholds(79.6, 94.4)).toEqual({ warn: 80, alert: 94 });
+  });
+
+  it('falls back per FIELD, not for the whole pair', () => {
+    // A garbled `warn` must not also throw away a good `alert`.
+    expect(quotaThresholds('x' as any, 90)).toEqual({ warn: 80, alert: 90 });
+    expect(quotaThresholds(NaN, 90)).toEqual({ warn: 80, alert: 90 });
+    expect(quotaThresholds(60, null as any)).toEqual({ warn: 60, alert: 95 });
+  });
+
+  it('lets the two collapse onto one number', () => {
+    // Somebody who wants a single alarm at 90 should get exactly one.
+    expect(quotaThresholds(90, 90)).toEqual({ warn: 90, alert: 90 });
+  });
+});
+
+describe('isNearLimit with a chosen threshold', () => {
+  it('colours on the number it is handed', () => {
+    expect(isNearLimit(59, 60)).toBe(false);
+    expect(isNearLimit(60, 60)).toBe(true);
+  });
+
+  it('still means 80 when nobody says otherwise', () => {
+    // The existing call sites pass one argument. Changing what they mean by
+    // accident is exactly the failure this default exists to prevent.
+    expect(isNearLimit(80)).toBe(true);
+    expect(isNearLimit(79)).toBe(false);
+  });
+
+  it('an unmeasured window is not an alarm at any threshold', () => {
+    expect(isNearLimit(null, 1)).toBe(false);
   });
 });

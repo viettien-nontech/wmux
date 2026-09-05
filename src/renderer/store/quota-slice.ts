@@ -1,7 +1,8 @@
 import { StateCreator } from 'zustand';
-import { parseQuota, QuotaState } from '../components/Sidebar/quota';
+import { parseQuota, quotaThresholds, QuotaState } from '../components/Sidebar/quota';
 import { quotaAlerts, alertTarget, type AlertMemory } from '../components/Sidebar/quota-alerts';
 import { NotificationSlice } from './notification-slice';
+import { SettingsSlice } from './settings-slice';
 import { WorkspaceSlice } from './workspace-slice';
 
 export interface QuotaSlice {
@@ -27,7 +28,7 @@ export function __resetQuotaAlertMemory(): void {
 }
 
 export const createQuotaSlice: StateCreator<
-  QuotaSlice & NotificationSlice & WorkspaceSlice,
+  QuotaSlice & NotificationSlice & SettingsSlice & WorkspaceSlice,
   [],
   [],
   QuotaSlice
@@ -37,9 +38,19 @@ export const createQuotaSlice: StateCreator<
     const quota = parseQuota(raw);
     set({ quota });
 
+    /* Thresholds read on every poll rather than captured once, so changing
+       them in Settings takes effect on the next reading instead of the next
+       launch — the moment somebody edits these is usually the moment they are
+       watching a number climb. */
+    const prefs = get().notificationPrefs;
+
     /* Ring after the store holds the new numbers, so a listener woken by the
        notification reads the reading it is about rather than the one before. */
-    const { alerts, memory } = quotaAlerts(alertMemory, quota);
+    const { alerts, memory } = quotaAlerts(
+      alertMemory,
+      quota,
+      quotaThresholds(prefs?.quotaWarnPct, prefs?.quotaAlertPct),
+    );
     alertMemory = memory;
     if (alerts.length === 0) return;
 

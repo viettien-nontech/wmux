@@ -242,3 +242,54 @@ describe('alertTarget', () => {
     expect(alertTarget([], 'ws-gone' as any)).toBeNull();
   });
 });
+
+// ─── the thresholds, once Settings owns them ─────────────────────────────────
+
+describe('quotaAlerts with chosen thresholds', () => {
+  const at = (warn: number, alert: number) => ({ warn, alert });
+
+  it('rings on the numbers it is handed, not on 80/95', () => {
+    const seen = quotaAlerts({}, state({ cc: { five: 62 } }), at(60, 70)).alerts;
+    expect(seen.map((a) => a.threshold)).toEqual([60]);
+  });
+
+  it('keeps ringing once per level with custom numbers', () => {
+    let memory: AlertMemory = {};
+    const th = at(60, 70);
+    const first = quotaAlerts(memory, state({ cc: { five: 62 } }), th);
+    memory = first.memory;
+    const again = quotaAlerts(memory, state({ cc: { five: 65 } }), th);
+    memory = again.memory;
+    const higher = quotaAlerts(memory, state({ cc: { five: 71 } }), th);
+
+    expect(first.alerts.map((a) => a.threshold)).toEqual([60]);
+    expect(again.alerts).toEqual([]);           // same level, already said
+    expect(higher.alerts.map((a) => a.threshold)).toEqual([70]);
+  });
+
+  it('rings ONCE when the two numbers are set to the same value', () => {
+    // Two identical levels in the ladder would announce the same crossing
+    // twice, and the second one carries no information at all.
+    const th = at(90, 90);
+    const first = quotaAlerts({}, state({ cc: { five: 91 } }), th);
+    expect(first.alerts.map((a) => a.threshold)).toEqual([90]);
+    expect(quotaAlerts(first.memory, state({ cc: { five: 99 } }), th).alerts).toEqual([]);
+  });
+
+  it('says "Gần cạn" at the ALERT number, wherever that was put', () => {
+    // The wording used to test `pct >= 95` on its own. With 95 configurable,
+    // a bell set to 70 would have rung with the calm sentence — the message
+    // and the level it was chosen for must not be able to disagree.
+    const [a] = quotaAlerts({}, state({ cc: { five: 71 } }), at(60, 70)).alerts;
+    expect(a.text).toContain('Gần cạn');
+
+    const [b] = quotaAlerts({}, state({ cc: { five: 62 } }), at(60, 70)).alerts;
+    expect(b.text).not.toContain('Gần cạn');
+  });
+
+  it('still means 80/95 when no thresholds are passed', () => {
+    // Every existing call site passes two arguments.
+    expect(quotaAlerts({}, state({ cc: { five: 81 } })).alerts.map((a) => a.threshold)).toEqual([80]);
+    expect(quotaAlerts({}, state({ cc: { five: 96 } })).alerts.map((a) => a.threshold)).toEqual([95]);
+  });
+});

@@ -2,6 +2,7 @@ import { StateCreator } from 'zustand';
 import { QuickLaunchProfile, SavedLayout } from '../../shared/types';
 import { INDEX_MODIFIER_CHOICES, IndexModifiers, reconcileIndexModifiers } from '../utils/index-shortcuts';
 import type { WorkspaceLayout } from './split-utils';
+import { DEFAULT_QUOTA_THRESHOLDS } from '../components/Sidebar/quota';
 import {
   Language,
   applyUserLocales,
@@ -496,6 +497,19 @@ export interface NotificationPrefs {
   agentInputNotify: boolean;
   /** Notify when an in-pane agent (Claude Code) finishes its turn / Stop hook (issue #53). */
   agentStopNotify: boolean;
+  /**
+   * Percent of a quota window at which the sidebar colours the number and the
+   * bell rings the first time.
+   *
+   * Lives with the notification prefs rather than the sidebar ones because the
+   * question it answers is "when do I get told", and the sidebar colour is the
+   * quiet half of the same answer. Both readers go through `quotaThresholds`,
+   * which repairs anything a hand-edited settings.json puts here — see
+   * `Sidebar/quota.ts`.
+   */
+  quotaWarnPct: number;
+  /** Percent at which the bell rings again, with the harsher wording. */
+  quotaAlertPct: number;
 }
 
 export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
@@ -506,6 +520,8 @@ export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
   sound: 'default',
   agentInputNotify: true,
   agentStopNotify: true,
+  quotaWarnPct: DEFAULT_QUOTA_THRESHOLDS.warn,
+  quotaAlertPct: DEFAULT_QUOTA_THRESHOLDS.alert,
 };
 
 // ─── Browser settings ─────────────────────────────────────────────────────────

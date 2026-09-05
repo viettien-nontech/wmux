@@ -74,6 +74,53 @@ export default function NotificationSettings() {
       </div>
 
       <div className="settings-divider" />
+      <h3 className="settings-section-title">{t('settings.notifications.quotaSection', 'Quota')}</h3>
+
+      <p className="settings-hint">
+        {t(
+          'settings.notifications.quotaHint',
+          'Chuông kêu một lần ở mỗi mức, cho mỗi cửa 5 giờ và cửa tuần. Mức thấp hơn cũng là mức sidebar tô màu.',
+        )}
+      </p>
+
+      <div className="settings-row">
+        <label className="settings-label">{t('settings.notifications.quotaWarn', 'Cảnh báo ở (%)')}</label>
+        <input
+          type="number"
+          className="settings-input settings-input--narrow"
+          value={notificationPrefs.quotaWarnPct}
+          min={1}
+          max={100}
+          onChange={(e) => setNotificationPrefs({ quotaWarnPct: clampPct(e.target.value, notificationPrefs.quotaWarnPct) })}
+        />
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">{t('settings.notifications.quotaAlert', 'Gần cạn ở (%)')}</label>
+        <input
+          type="number"
+          className="settings-input settings-input--narrow"
+          value={notificationPrefs.quotaAlertPct}
+          min={1}
+          max={100}
+          onChange={(e) => setNotificationPrefs({ quotaAlertPct: clampPct(e.target.value, notificationPrefs.quotaAlertPct) })}
+        />
+      </div>
+
+      {notificationPrefs.quotaWarnPct > notificationPrefs.quotaAlertPct && (
+        /* Said rather than corrected. Reordering the fields as they are typed
+           makes the box under the cursor jump, so the two numbers are stored
+           exactly as entered and every reader sorts them — which means the
+           lower one warns either way round. Worth one sentence, not an error. */
+        <p className="settings-hint">
+          {t(
+            'settings.notifications.quotaInverted',
+            'Số nhỏ hơn luôn là mức cảnh báo trước — hai ô đang ngược nhau, nhưng chuông vẫn kêu đúng thứ tự.',
+          )}
+        </p>
+      )}
+
+      <div className="settings-divider" />
       <h3 className="settings-section-title">{t('settings.notifications.soundSection', 'Sound')}</h3>
 
       <div className="settings-row">
@@ -104,4 +151,19 @@ export default function NotificationSettings() {
       </div>
     </div>
   );
+}
+
+/**
+ * What a keystroke in one of the percent boxes is worth.
+ *
+ * An empty box is `''`, and `Number('')` is 0 — which would be written to
+ * settings as a threshold every reading has crossed, i.e. a bell that rings
+ * forever, from deleting one character. Keep the previous value for anything
+ * that is not a number, and clamp the rest into the range the tool's own
+ * numbers live in.
+ */
+function clampPct(raw: string, previous: number): number {
+  const n = Number(raw);
+  if (raw.trim() === '' || !Number.isFinite(n)) return previous;
+  return Math.min(100, Math.max(1, Math.round(n)));
 }

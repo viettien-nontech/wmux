@@ -1,9 +1,18 @@
 import { useStore } from '../../store';
 import { useT } from '../../i18n';
 
-export default function SidebarSettings() {
+/**
+ * `onOpenQuotaThresholds` exists because the quota banner is drawn HERE but the
+ * numbers that colour it are set under Notifications — they decide when a bell
+ * rings, and splitting one pair of numbers across two tabs would be worse than
+ * putting them in the wrong one. A pointer that actually moves the tab, rather
+ * than a sentence naming a place the reader then has to find, because the whole
+ * reason this row exists is that somebody looked in the wrong tab first.
+ */
+export default function SidebarSettings({ onOpenQuotaThresholds }: { onOpenQuotaThresholds?: () => void }) {
   const t = useT();
   const { sidebarPrefs, setSidebarPrefs, appearancePrefs, setAppearancePrefs } = useStore();
+  const { quotaWarnPct, quotaAlertPct } = useStore((st) => st.notificationPrefs);
 
   return (
     <div className="settings-section">
@@ -125,6 +134,22 @@ export default function SidebarSettings() {
           onChange={(e) => setSidebarPrefs({ backgroundOpacity: Number(e.target.value) })}
         />
       </div>
+
+      <div className="settings-divider" />
+      <h3 className="settings-section-title">{t('settings.sidebarPanel.quotaSection', 'Quota')}</h3>
+
+      <div className="settings-row">
+        <label className="settings-label">
+          {t('settings.sidebarPanel.quotaThresholds', 'Ngưỡng tô màu và báo chuông')}
+        </label>
+        <button type="button" className="settings-button" onClick={onOpenQuotaThresholds}>
+          {`${Math.min(quotaWarnPct, quotaAlertPct)}% / ${Math.max(quotaWarnPct, quotaAlertPct)}% →`}
+        </button>
+      </div>
+
+      <p className="settings-hint">
+        {t('settings.sidebarPanel.quotaThresholdsHint', 'Đặt trong tab Notifications, cùng chỗ với chuông.')}
+      </p>
     </div>
   );
 }

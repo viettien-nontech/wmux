@@ -306,6 +306,11 @@ export const en = {
   'settings.notifications.agentStopNotify': 'Notify when agent finishes its turn',
   'settings.notifications.soundSection': 'Sound',
   'settings.notifications.sound': 'Notification sound',
+  'settings.notifications.quotaSection': 'Quota',
+  'settings.notifications.quotaHint': 'The bell rings once per level, for each 5-hour and weekly window. The lower level is also the one the sidebar colours on.',
+  'settings.notifications.quotaWarn': 'Warn at (%)',
+  'settings.notifications.quotaAlert': 'Nearly out at (%)',
+  'settings.notifications.quotaInverted': 'The lower number always warns first — these two are the wrong way round, but the bell still rings in order.',
   'settings.notifications.preview': 'Preview',
   // Settings — Keyboard panel
   'settings.keyboard.title': 'Keyboard Shortcuts',
@@ -475,6 +480,9 @@ export const en = {
   'settings.sidebarPanel.indicator.leftRail': 'Left Rail',
   'settings.sidebarPanel.indicator.solidFill': 'Solid Fill',
   'settings.sidebarPanel.backgroundOpacity': 'Background opacity',
+  'settings.sidebarPanel.quotaSection': 'Quota',
+  'settings.sidebarPanel.quotaThresholds': 'Colour and bell thresholds',
+  'settings.sidebarPanel.quotaThresholdsHint': 'Set under the Notifications tab, next to the bell.',
   // Settings — Terminal panel
   'settings.terminalPanel.font': 'Font',
   'settings.terminalPanel.customStack': 'Custom stack…',

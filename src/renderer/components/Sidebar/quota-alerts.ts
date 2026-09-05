@@ -17,12 +17,23 @@
  * sequences.
  */
 
-import type { QuotaState, QuotaWindow } from './quota';
+import { DEFAULT_QUOTA_THRESHOLDS, type QuotaState, type QuotaThresholds, type QuotaWindow } from './quota';
 import type { SplitNode, SurfaceId, WorkspaceId } from '../../../shared/types';
 
-/** Announce at these, high to low. The 80 is deliberately the same number
- *  `isNearLimit` colours on, so the badge and the bell never disagree. */
-const THRESHOLDS = [95, 80] as const;
+/**
+ * The ladder to announce on, high to low.
+ *
+ * Built from the pair rather than written down, and the `warn < alert` guard is
+ * the load-bearing line: Settings lets both be set to the same number (one
+ * alarm, at 90, is a reasonable thing to want), and a ladder holding 90 twice
+ * would announce the same crossing twice — the second time carrying nothing.
+ *
+ * The warn rung is deliberately the same number `isNearLimit` colours on, so
+ * the badge and the bell can never disagree about what "near" means.
+ */
+function ladder(t: QuotaThresholds): number[] {
+  return t.warn < t.alert ? [t.alert, t.warn] : [t.alert];
+}
 
 const WINDOWS = [
   { key: 'fiveHour', label: '5h' },
@@ -35,7 +46,7 @@ export interface QuotaAlert {
   bayLabel: string;
   windowKey: 'fiveHour' | 'sevenDay';
   windowLabel: string;
-  /** Which threshold was crossed: 80 or 95. */
+  /** Which of the two configured thresholds was crossed. */
   threshold: number;
   /** The reading that crossed it. */
   pct: number;
@@ -72,8 +83,8 @@ export type AlertMemory = Record<string, AlertMark>;
 const windowKeyOf = (bayId: string, windowKey: string): string => `${bayId}:${windowKey}`;
 
 /** The highest threshold this reading is at or above, or 0 for none. */
-function crossedBy(pct: number): number {
-  return THRESHOLDS.find((t) => pct >= t) ?? 0;
+function crossedBy(pct: number, rungs: number[]): number {
+  return rungs.find((t) => pct >= t) ?? 0;
 }
 
 function hhmm(unixSeconds: number): string {
@@ -87,11 +98,20 @@ function hhmm(unixSeconds: number): string {
  * bell saying "stale" is the kind of split the project spends its effort
  * avoiding.
  */
-function wording(bayLabel: string, windowLabel: string, pct: number, resetsAt: number | null) {
+function wording(
+  bayLabel: string,
+  windowLabel: string,
+  pct: number,
+  resetsAt: number | null,
+  alertPct: number,
+) {
   const when = resetsAt != null ? ` · mở lại ${hhmm(resetsAt)}` : '';
+  /* Compared against the CHOSEN alert level, not a literal 95. A bell moved
+     down to 70 would otherwise ring with the calm sentence at the exact number
+     its owner picked as the serious one. */
   return {
     title: `${bayLabel} ${windowLabel} ${pct}%`,
-    text: pct >= 95
+    text: pct >= alertPct
       ? `Gần cạn: cửa ${windowLabel} của ${bayLabel} đã dùng ${pct}%${when}`
       : `Cửa ${windowLabel} của ${bayLabel} đã dùng ${pct}%${when}`,
   };
@@ -107,9 +127,11 @@ function wording(bayLabel: string, windowLabel: string, pct: number, resetsAt: n
 export function quotaAlerts(
   memory: AlertMemory,
   state: QuotaState,
+  thresholds: QuotaThresholds = DEFAULT_QUOTA_THRESHOLDS,
 ): { alerts: QuotaAlert[]; memory: AlertMemory } {
   const alerts: QuotaAlert[] = [];
   const next: AlertMemory = {};
+  const rungs = ladder(thresholds);
 
   for (const bay of state.bays ?? []) {
     for (const { key, label } of WINDOWS) {
@@ -131,7 +153,7 @@ export function quotaAlerts(
       /* A different `resetsAt` is a different five hours, so whatever was
          announced belongs to a window that is over. */
       const announced = mark && mark.cycle === resetsAt ? mark.announced : 0;
-      const crossed = crossedBy(pct);
+      const crossed = crossedBy(pct, rungs);
 
       if (crossed > announced) {
         alerts.push({
@@ -142,7 +164,7 @@ export function quotaAlerts(
           threshold: crossed,
           pct,
           resetsAt,
-          ...wording(bay.label, label, pct, resetsAt),
+          ...wording(bay.label, label, pct, resetsAt, thresholds.alert),
         });
       }
 

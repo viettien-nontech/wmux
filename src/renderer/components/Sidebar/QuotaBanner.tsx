@@ -1,6 +1,6 @@
 import { useStore } from '../../store';
 import { useT } from '../../i18n';
-import { isNearLimit, formatResetTime, staleBadge, type QuotaBay } from './quota';
+import { isNearLimit, quotaThresholds, formatResetTime, staleBadge, type QuotaBay } from './quota';
 
 /**
  * The account's remaining quota, always visible above the workspace list.
@@ -27,6 +27,12 @@ import { isNearLimit, formatResetTime, staleBadge, type QuotaBay } from './quota
  */
 export default function QuotaBanner() {
   const quota = useStore((s) => s.quota);
+  /* Subscribed to the two numbers, not to the prefs object: the banner must
+     recolour when somebody moves the threshold in Settings, and picking the
+     whole object would re-render it on every unrelated notification toggle. */
+  const warnPct = useStore((s) => s.notificationPrefs.quotaWarnPct);
+  const alertPct = useStore((s) => s.notificationPrefs.quotaAlertPct);
+  const { warn } = quotaThresholds(warnPct, alertPct);
   const t = useT();
 
   if (!quota) return <QuotaSkeleton />;
@@ -45,7 +51,7 @@ export default function QuotaBanner() {
     <div className="quota-banner">
       {quota.bays.map((bay) => (
         <div key={bay.id} className="quota-banner__bay" title={bay.reason || undefined}>
-          <QuotaBayLine bay={bay} />
+          <QuotaBayLine bay={bay} warn={warn} />
         </div>
       ))}
     </div>
@@ -78,25 +84,25 @@ function QuotaSkeleton() {
   );
 }
 
-function Pct({ value }: { value: number | null }) {
+function Pct({ value, warn }: { value: number | null; warn: number }) {
   return (
-    <span className={isNearLimit(value) ? 'quota-banner__pct quota-banner__pct--near' : 'quota-banner__pct'}>
+    <span className={isNearLimit(value, warn) ? 'quota-banner__pct quota-banner__pct--near' : 'quota-banner__pct'}>
       {value != null ? `${value}%` : '?'}
     </span>
   );
 }
 
-function QuotaBayLine({ bay }: { bay: QuotaBay }) {
+function QuotaBayLine({ bay, warn }: { bay: QuotaBay; warn: number }) {
   const reset = formatResetTime(bay.fiveHour.resetsAt);
   const badge = staleBadge(bay);
   return (
     <>
       <span className="quota-banner__label">{bay.label}</span>
       <span className="quota-banner__window">5h</span>
-      <Pct value={bay.fiveHour.pct} />
+      <Pct value={bay.fiveHour.pct} warn={warn} />
       {reset && <span className="quota-banner__reset">→{reset}</span>}
       <span className="quota-banner__window">Weekly</span>
-      <Pct value={bay.sevenDay.pct} />
+      <Pct value={bay.sevenDay.pct} warn={warn} />
       {/* `?` on its own reads the same for "no agent has ever run here" as for
           "the reading expired" — one is nothing to act on, the other means the
           numbers on screen are no longer true. The word is short because the

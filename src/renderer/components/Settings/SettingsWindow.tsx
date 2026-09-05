@@ -70,7 +70,7 @@ export default function SettingsWindow({ onClose }: SettingsWindowProps) {
           </div>
           <div className="settings-content">
             {activeTab === 'General' && <GeneralSettings />}
-            {activeTab === 'Sidebar' && <SidebarSettings />}
+            {activeTab === 'Sidebar' && <SidebarSettings onOpenQuotaThresholds={() => setActiveTab('Notifications')} />}
             {activeTab === 'Workspace' && <WorkspaceSettings />}
             {activeTab === 'Terminal' && <TerminalSettings />}
             {activeTab === 'Prompts' && <PromptSettings />}

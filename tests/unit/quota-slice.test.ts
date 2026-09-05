@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { create } from 'zustand';
 import { createWorkspaceSlice, WorkspaceSlice } from '../../src/renderer/store/workspace-slice';
 import { createNotificationSlice, NotificationSlice } from '../../src/renderer/store/notification-slice';
+import { createSettingsSlice, SettingsSlice } from '../../src/renderer/store/settings-slice';
 import { createQuotaSlice, QuotaSlice, __resetQuotaAlertMemory } from '../../src/renderer/store/quota-slice';
 
 // `quota-alerts.test.ts` pins the DECISION. This pins the WIRING — that a
@@ -106,5 +107,96 @@ describe('quota-slice → the bell', () => {
     const s = () => useStore.getState();
     s().setQuotaRaw(raw(null));
     expect(s().notifications).toHaveLength(0);
+  });
+});
+
+// ─── the thresholds Settings owns actually reaching the bell ─────────────────
+//
+// The pure function is pinned in `quota-alerts.test.ts`; what can rot here is
+// the wiring. Two numbers that a Settings box writes and nothing reads look
+// exactly like two numbers that work, right up until the bell rings at 80 for
+// somebody who asked for 60.
+
+type PrefStore = TestStore & SettingsSlice;
+
+function makeStoreWithSettings() {
+  return create<PrefStore>()((...args) => ({
+    ...createWorkspaceSlice(...args),
+    ...createNotificationSlice(...args),
+    ...createSettingsSlice(...args),
+    ...createQuotaSlice(...args),
+  }));
+}
+
+describe('quota-slice → the thresholds from Settings', () => {
+  let useStore: ReturnType<typeof makeStoreWithSettings>;
+
+  beforeEach(() => {
+    __resetQuotaAlertMemory();
+    useStore = makeStoreWithSettings();
+    useStore.getState().createWorkspace({ title: 'Test WS' });
+  });
+
+  it('ships with 80/95, so nobody who never opens Settings notices a change', () => {
+    const s = () => useStore.getState();
+    expect(s().notificationPrefs.quotaWarnPct).toBe(80);
+    expect(s().notificationPrefs.quotaAlertPct).toBe(95);
+    s().setQuotaRaw(raw(79));
+    expect(s().notifications).toHaveLength(0);
+    s().setQuotaRaw(raw(81));
+    expect(s().notifications).toHaveLength(1);
+  });
+
+  it('rings on the number the user set, not on 80', () => {
+    const s = () => useStore.getState();
+    s().setNotificationPrefs({ quotaWarnPct: 60, quotaAlertPct: 70 });
+    s().setQuotaRaw(raw(62));
+    expect(s().notifications).toHaveLength(1);
+    expect(s().notifications[0].title).toContain('62%');
+  });
+
+  it('takes a threshold change on the NEXT reading, not the next launch', () => {
+    // The moment somebody edits these is usually the moment they are watching a
+    // number climb, so a value captured once at startup would be useless
+    // exactly when it is being changed.
+    const s = () => useStore.getState();
+    s().setQuotaRaw(raw(62));
+    expect(s().notifications).toHaveLength(0);
+
+    s().setNotificationPrefs({ quotaWarnPct: 60 });
+    s().setQuotaRaw(raw(63));
+    expect(s().notifications).toHaveLength(1);
+  });
+
+  it('reads an inverted pair in the order it obviously means', () => {
+    const s = () => useStore.getState();
+    s().setNotificationPrefs({ quotaWarnPct: 70, quotaAlertPct: 60 });
+    s().setQuotaRaw(raw(62));
+    expect(s().notifications).toHaveLength(1);          // the 60 rung, not the 70
+    expect(s().notifications[0].text).not.toContain('Gần cạn');
+    s().setQuotaRaw(raw(71));
+    expect(s().notifications).toHaveLength(2);
+    expect(s().notifications[1].text).toContain('Gần cạn');
+  });
+
+  it('a settings file with garbage in it still rings at the default', () => {
+    // `settings.json` has a second writer: a person with an editor. A field
+    // that is not a number is not an instruction, so it falls back — and it
+    // falls back ALONE, without taking the good field with it.
+    const s = () => useStore.getState();
+    s().setNotificationPrefs({ quotaWarnPct: 'x' as any, quotaAlertPct: undefined as any });
+    s().setQuotaRaw(raw(79));
+    expect(s().notifications).toHaveLength(0);
+    s().setQuotaRaw(raw(81));
+    expect(s().notifications).toHaveLength(1);
+  });
+
+  it('a threshold above 100 is pulled back to 100 rather than silencing the bell', () => {
+    // The only genuinely unreachable value. Left alone it would be a bell that
+    // never rings and never explains itself — the failure nobody notices.
+    const s = () => useStore.getState();
+    s().setNotificationPrefs({ quotaWarnPct: 400 as any, quotaAlertPct: 900 as any });
+    s().setQuotaRaw(raw(100));
+    expect(s().notifications).toHaveLength(1);
   });
 });
