@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { create } from 'zustand';
 import { createWorkspaceSlice, WorkspaceSlice } from '../../src/renderer/store/workspace-slice';
 import { createNotificationSlice, NotificationSlice } from '../../src/renderer/store/notification-slice';
 import { createSettingsSlice, SettingsSlice } from '../../src/renderer/store/settings-slice';
+import { QUOTA_ALERT_SURFACE } from '../../src/renderer/components/Sidebar/quota-alerts';
 import { createQuotaSlice, QuotaSlice, __resetQuotaAlertMemory } from '../../src/renderer/store/quota-slice';
 
 // `quota-alerts.test.ts` pins the DECISION. This pins the WIRING — that a
@@ -198,5 +199,74 @@ describe('quota-slice → the thresholds from Settings', () => {
     s().setNotificationPrefs({ quotaWarnPct: 400 as any, quotaAlertPct: 900 as any });
     s().setQuotaRaw(raw(100));
     expect(s().notifications).toHaveLength(1);
+  });
+});
+
+// ─── quota leaving the window, like every other notification ────────────────
+//
+// Quota used to be the ONE notification kind that never reached the OS: agent
+// events go through `fireNotification`, which adds the bell entry AND raises
+// the toast, while quota called `addNotification` on its own. So the bell lit
+// in a window nobody was looking at — which is the entire situation the quota
+// alert exists for, since the sidebar is a strip of colour in the corner of the
+// eye while you type in a pane.
+
+describe('quota-slice → out of the window', () => {
+  let useStore: ReturnType<typeof makeStoreWithSettings>;
+  let fired: Array<{ surfaceId: string; text: string; title?: string }>;
+
+  beforeEach(() => {
+    __resetQuotaAlertMemory();
+    fired = [];
+    (globalThis as any).window = {
+      wmux: { notification: { fire: (d: any) => fired.push(d) } },
+    };
+    useStore = makeStoreWithSettings();
+    useStore.getState().createWorkspace({ title: 'Test WS' });
+  });
+
+  afterEach(() => {
+    delete (globalThis as any).window;
+  });
+
+  it('raises the OS notification, not only the in-app bell', () => {
+    const s = () => useStore.getState();
+    s().setQuotaRaw(raw(96));
+    expect(s().notifications).toHaveLength(1);
+    expect(fired).toHaveLength(1);
+    expect(fired[0].text).toContain('96%');
+  });
+
+  it('carries the alert own title instead of a bare "wmux"', () => {
+    // The agent path hardcodes 'wmux' because its text already names the pane.
+    // A quota toast that said only "wmux" would drop the one thing that makes
+    // it actionable: WHICH bay and WHICH window.
+    useStore.getState().setQuotaRaw(raw(96));
+    expect(fired[0].title).toContain('CC');
+    expect(fired[0].title).toContain('96%');
+  });
+
+  it('files the toast against the same surface no pane can own', () => {
+    // Same reason as the bell entry: `PaneWrapper` marks a pane read on focus,
+    // and any real surface id would be a pane's.
+    useStore.getState().setQuotaRaw(raw(96));
+    expect(fired[0].surfaceId).toBe(QUOTA_ALERT_SURFACE);
+  });
+
+  it('rings the OS exactly as often as the bell — once per level', () => {
+    const s = () => useStore.getState();
+    s().setQuotaRaw(raw(85));
+    s().setQuotaRaw(raw(88));
+    s().setQuotaRaw(raw(96));
+    expect(s().notifications).toHaveLength(2);
+    expect(fired).toHaveLength(2);
+  });
+
+  it('stays silent outside Electron rather than throwing', () => {
+    // The store is also constructed in tests and any non-Electron context,
+    // where `window` does not exist at all.
+    delete (globalThis as any).window;
+    expect(() => useStore.getState().setQuotaRaw(raw(96))).not.toThrow();
+    expect(useStore.getState().notifications).toHaveLength(1);
   });
 });

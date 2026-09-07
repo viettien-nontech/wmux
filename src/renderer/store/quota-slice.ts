@@ -1,6 +1,7 @@
 import { StateCreator } from 'zustand';
 import { parseQuota, quotaThresholds, QuotaState } from '../components/Sidebar/quota';
 import { quotaAlerts, alertTarget, type AlertMemory } from '../components/Sidebar/quota-alerts';
+import { fireNotification } from '../notify';
 import { NotificationSlice } from './notification-slice';
 import { SettingsSlice } from './settings-slice';
 import { WorkspaceSlice } from './workspace-slice';
@@ -58,8 +59,12 @@ export const createQuotaSlice: StateCreator<
     const target = alertTarget(state.workspaces, state.activeWorkspaceId);
     if (!target) return;
 
+    /* Through the same chokepoint the agent events use, so quota stops being
+       the one notification kind that never leaves the window — see `notify.ts`.
+       It carries its own title: a toast saying only "wmux" would drop which bay
+       and which window, which is all a quota alert has to say. */
     for (const a of alerts) {
-      state.addNotification({ ...target, text: a.text, title: a.title });
+      fireNotification(target.surfaceId, target.workspaceId, a.text, state.addNotification, a.title);
     }
   },
 });

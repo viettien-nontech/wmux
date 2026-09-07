@@ -91,6 +91,8 @@ function findBottomPane(node: SplitNode): PaneId | null {
   return findBottomPane(node.children[0]);
 }
 
+import { fireNotification } from './notify';
+
 // ─── Shell-integration / hook metadata handlers (issue #53) ───────────────────
 // Extracted from the metadata + hook listeners so each function stays under the
 // cognitive-complexity budget. `fireNotification` is the single place that both
@@ -196,17 +198,6 @@ async function restoreNamedSession(t: T, setWidth: SetWidth): Promise<boolean> {
   }
 }
 
-function fireNotification(
-  surfaceId: string,
-  workspaceId: WorkspaceId | null,
-  text: string,
-  addNotification: StoreAction,
-): void {
-  if (workspaceId) {
-    addNotification({ surfaceId: (surfaceId || '') as SurfaceId, workspaceId, text });
-  }
-  window.wmux?.notification?.fire({ surfaceId: surfaceId || '', text, title: 'wmux' });
-}
 
 /** Resolve the workspace that owns a surface, or undefined. */
 function workspaceForSurface(surfaceId: string): WorkspaceInfo | undefined {
