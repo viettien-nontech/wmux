@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { PtyManager, parseShellSpec, resolveSpawnCwd, resolveShellForCwd, resolveExistingShellPath, comparePackageVersion, shellEnv, shellProbe, resetShellPathCache } from '../../src/main/pty-manager';
+import { PtyManager, parseShellSpec, resolveSpawnCwd, resolveShellForCwd, resolveExistingShellPath, resolveAppExecLink, comparePackageVersion, shellEnv, shellProbe, resetShellPathCache } from '../../src/main/pty-manager';
 import type { SurfaceId } from '../../src/shared/types';
 
 const TEST_SHELL = 'cmd.exe';
@@ -247,6 +247,30 @@ describe('resolveExistingShellPath', () => {
       ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe')
       : '/bin/sh';
     expect(resolveExistingShellPath(exe)).toBe(exe);
+  });
+
+  it('reads an App Execution Alias back to the exe it points at', () => {
+    if (process.platform !== 'win32') return;
+    // `where pwsh.exe` finds only the alias, and `existsSync` refuses it — the
+    // reparse point has no data stream. `readlink` DOES answer, with the exact
+    // package path, which is the only way to get it on a normal account:
+    // listing %ProgramFiles%\WindowsApps throws EPERM for anyone but
+    // TrustedInstaller, so enumerating the package directory cannot work.
+    const alias = path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WindowsApps', 'pwsh.exe');
+    const target = resolveAppExecLink(alias);
+    if (!target) return;  // no Store PowerShell on this machine
+    expect(fs.existsSync(target)).toBe(true);
+    expect(path.basename(target).toLowerCase()).toBe('pwsh.exe');
+  });
+
+  it('answers undefined for a plain file rather than throwing', () => {
+    // `readlink` on a non-link throws EINVAL, and this runs on every pane
+    // create — a throw here would take the whole shell resolution with it.
+    const plain = process.platform === 'win32'
+      ? path.join(process.env.SystemRoot || 'C:\Windows', 'System32', 'cmd.exe')
+      : '/bin/sh';
+    expect(resolveAppExecLink(plain)).toBeUndefined();
+    expect(resolveAppExecLink(path.join(plain, 'nope', 'missing.exe'))).toBeUndefined();
   });
 
   it('skips WindowsApps aliases and finds a real file for pwsh', () => {

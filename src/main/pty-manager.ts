@@ -54,7 +54,36 @@ function firstExistingOnPath(name: string): string | undefined {
       .split(/\r?\n/)
       .map((s) => s.trim())
       .filter(Boolean);
-    return hits.find((p) => fs.existsSync(p));
+    return hits.find((p) => fs.existsSync(p))
+      /* Nothing `where` found is a real file. On Windows that usually means an
+         App Execution Alias, which is a reparse point with no data stream:
+         `existsSync` says no and node-pty cannot spawn it. `readlink` reads it,
+         and the answer is the exact package path. */
+      ?? hits.map(resolveAppExecLink).find(Boolean);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The real executable behind a Windows App Execution Alias, or undefined.
+ *
+ * This is how a Store-installed shell is found, and on a normal account it is
+ * the ONLY way: `%ProgramFiles%\WindowsApps` is ACL'd to TrustedInstaller, so
+ * `readdirSync` on it throws `EPERM` for everybody else — which is why
+ * `findStorePwsh` below, which enumerates that directory, silently returned
+ * undefined on 2026-09-06 on a machine where PowerShell 7.6.5 was installed and
+ * running. Walking INTO a known package path is allowed; listing the parent is
+ * not, and the alias is what supplies the name nobody can enumerate.
+ *
+ * Undefined for a plain file, a missing path, or a platform without these:
+ * `readlink` throws `EINVAL` on a non-link, and this sits on the pane-create
+ * path where a throw would take the whole shell resolution down with it.
+ */
+export function resolveAppExecLink(aliasPath: string): string | undefined {
+  try {
+    const target = fs.readlinkSync(aliasPath);
+    return target && fs.existsSync(target) ? target : undefined;
   } catch {
     return undefined;
   }
@@ -87,6 +116,11 @@ export function comparePackageVersion(a: string, b: string): number {
  * does not match `Microsoft.PowerShellPreview_`.
  */
 function findStorePwsh(preview: boolean): string | undefined {
+  /* Kept as a second answer, not the first one. `readdirSync` here throws
+     EPERM on a standard account — WindowsApps is ACL'd to TrustedInstaller —
+     so this only ever succeeds for an elevated process. `resolveAppExecLink`
+     above covers the normal case; this stays for the machine where the alias
+     is missing but the directory happens to be readable. */
   const root = path.join(process.env.ProgramFiles || 'C:\\Program Files', 'WindowsApps');
   const prefix = preview ? 'Microsoft.PowerShellPreview_' : 'Microsoft.PowerShell_';
   try {
