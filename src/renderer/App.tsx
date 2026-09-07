@@ -91,7 +91,7 @@ function findBottomPane(node: SplitNode): PaneId | null {
   return findBottomPane(node.children[0]);
 }
 
-import { fireNotification } from './notify';
+import { fireNotification, notificationChannels } from './notify';
 
 // ─── Shell-integration / hook metadata handlers (issue #53) ───────────────────
 // Extracted from the metadata + hook listeners so each function stays under the
@@ -279,7 +279,8 @@ function handleNotifyCommand(cmd: any, addNotification: StoreAction, t: T): void
   const text = (cmd.args || []).join(' ').trim() || t('app.notificationDefault', 'Notification');
   const ws = workspaceForSurface(cmd.surfaceId);
   const wsId = ws?.id || useStore.getState().activeWorkspaceId;
-  fireNotification(cmd.surfaceId, wsId, text, addNotification);
+  fireNotification(cmd.surfaceId, wsId, text, addNotification, undefined,
+    notificationChannels(useStore.getState().notificationPrefs));
 }
 
 /** report_shell_state: notify when a foreground command ran ≥ 5s. */
@@ -308,7 +309,8 @@ function applyShellState(cmd: any, ws: WorkspaceInfo, deps: MetaDeps): void {
   const msg = newState === 'interrupted'
     ? deps.t('app.interruptedIn', 'Interrupted in {workspace} ({duration})').replace('{workspace}', ws.title).replace('{duration}', duration)
     : deps.t('app.finishedIn', 'Finished in {workspace} ({duration})').replace('{workspace}', ws.title).replace('{duration}', duration);
-  fireNotification(cmd.surfaceId, ws.id, msg, deps.addNotification);
+  fireNotification(cmd.surfaceId, ws.id, msg, deps.addNotification, undefined,
+    notificationChannels(useStore.getState().notificationPrefs));
 }
 
 /** Apply a patch to one surface of `ws`, wherever in the split tree it lives. */
@@ -417,7 +419,8 @@ function handleAgentLifecycleEvent(event: any, addNotification: StoreAction, t: 
       ? t('app.claudeFinishedIn', 'Claude Code finished in {workspace}').replace('{workspace}', wsTitle)
       : t('app.claudeFinished', 'Claude Code finished');
   }
-  fireNotification(sid, wsId, text, addNotification);
+  fireNotification(sid, wsId, text, addNotification, undefined,
+    notificationChannels(useStore.getState().notificationPrefs));
 }
 
 /**

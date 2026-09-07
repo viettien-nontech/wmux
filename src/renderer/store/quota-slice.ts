@@ -1,7 +1,7 @@
 import { StateCreator } from 'zustand';
 import { parseQuota, quotaThresholds, QuotaState } from '../components/Sidebar/quota';
 import { quotaAlerts, alertTarget, type AlertMemory } from '../components/Sidebar/quota-alerts';
-import { fireNotification } from '../notify';
+import { fireNotification, notificationChannels } from '../notify';
 import { NotificationSlice } from './notification-slice';
 import { SettingsSlice } from './settings-slice';
 import { WorkspaceSlice } from './workspace-slice';
@@ -64,7 +64,8 @@ export const createQuotaSlice: StateCreator<
        It carries its own title: a toast saying only "wmux" would drop which bay
        and which window, which is all a quota alert has to say. */
     for (const a of alerts) {
-      fireNotification(target.surfaceId, target.workspaceId, a.text, state.addNotification, a.title);
+      fireNotification(target.surfaceId, target.workspaceId, a.text, state.addNotification, a.title,
+        notificationChannels(prefs));
     }
   },
 });

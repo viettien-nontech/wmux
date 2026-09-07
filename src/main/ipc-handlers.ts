@@ -682,17 +682,34 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
   // Exposed so diagnostics (and the CLI) can report which path was read.
   ipcMain.handle('config:getUserConfigPath', async () => getConfigPath());
 
-  ipcMain.on(IPC_CHANNELS.NOTIFICATION_FIRE, (_event, data: { surfaceId: string; text: string; title?: string }) => {
+  ipcMain.on(IPC_CHANNELS.NOTIFICATION_FIRE, (_event, data: {
+    surfaceId: string;
+    text: string;
+    title?: string;
+    /* Settings → Notifications, carried from the renderer because that is where
+       the prefs live and this is where the two things they govern happen. Both
+       were drawn, persisted, and read by nothing until 2.9.x: turning "Show
+       toast notifications" off changed no behaviour at all.
+
+       `!== false` rather than a truthy test, and that is the load-bearing part:
+       an ABSENT flag means "the caller has no prefs", not "no". Main fires this
+       channel itself for `surface.trigger_flash`, where there is no renderer to
+       ask — treating absent as off would silence that path for good. */
+    toast?: boolean;
+    taskbarFlash?: boolean;
+  }) => {
     const window = BrowserWindow.fromWebContents(_event.sender);
     // Show toast
-    notificationManager.showToast(data.title || 'wmux', data.text, () => {
-      if (window && !window.isDestroyed()) {
-        window.focus();
-        window.webContents.send('notification:focus-surface', data.surfaceId);
-      }
-    });
+    if (data.toast !== false) {
+      notificationManager.showToast(data.title || 'wmux', data.text, () => {
+        if (window && !window.isDestroyed()) {
+          window.focus();
+          window.webContents.send('notification:focus-surface', data.surfaceId);
+        }
+      });
+    }
     // Flash taskbar
-    if (window && !window.isDestroyed()) {
+    if (data.taskbarFlash !== false && window && !window.isDestroyed()) {
       notificationManager.flashTaskbar(window);
     }
     // Ask the renderer to play the notification sound. The main process can't
@@ -700,6 +717,10 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
     // `notificationPrefs.sound` preference — it decides whether to actually
     // play. Sending here makes this the single chokepoint for every fired
     // notification (OSC 9/99/777 + App.tsx) regardless of call-site (issue #32).
+    //
+    // Unconditional against the two flags above on purpose: sound is a THIRD
+    // switch with its own setting. Muting it along with the toast would make
+    // one control govern two things the user set separately.
     if (window && !window.isDestroyed()) {
       window.webContents.send('notification:play-sound');
     }

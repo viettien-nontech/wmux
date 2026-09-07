@@ -16,6 +16,7 @@
  */
 
 import type { SurfaceId, WorkspaceId } from '../shared/types';
+import type { NotificationPrefs } from './store/settings-slice';
 
 type AddNotification = (n: { surfaceId: SurfaceId; workspaceId: WorkspaceId; text: string; title?: string }) => void;
 
@@ -25,7 +26,43 @@ type AddNotification = (n: { surfaceId: SurfaceId; workspaceId: WorkspaceId; tex
  * is a ReferenceError rather than undefined, and would take the whole store
  * down with it.
  */
-function osNotify(data: { surfaceId: string; text: string; title?: string }): void {
+/**
+ * Which ways a notification is allowed to leave the window.
+ *
+ * These two switches live in the renderer store, and both things they govern
+ * happen in MAIN, which has no copy of the prefs — so the decision travels with
+ * the notification. It is the mirror of how sound already worked: main asks the
+ * renderer to play, because only the renderer knows the sound preference.
+ *
+ * They were declared, drawn in Settings, persisted, and read by NOTHING before
+ * this. A switch that does nothing is worse than a missing one — the user
+ * believes they have already told the app, so when it carries on they conclude
+ * something else is broken, and they are right to.
+ */
+export interface NotificationChannels {
+  toast: boolean;
+  taskbarFlash: boolean;
+}
+
+/**
+ * Absent means ON, per field. A settings blob written before these were honoured
+ * holds no opinion, and no opinion must never silence a notification — that is
+ * the failure nobody notices, because its symptom is an absence.
+ */
+export function notificationChannels(prefs: NotificationPrefs | undefined): NotificationChannels {
+  return {
+    toast: prefs?.toast !== false,
+    taskbarFlash: prefs?.taskbarFlash !== false,
+  };
+}
+
+function osNotify(data: {
+  surfaceId: string;
+  text: string;
+  title?: string;
+  toast?: boolean;
+  taskbarFlash?: boolean;
+}): void {
   try {
     (globalThis as { window?: { wmux?: { notification?: { fire?: (d: typeof data) => void } } } })
       .window?.wmux?.notification?.fire?.(data);
@@ -57,6 +94,7 @@ export function fireNotification(
   text: string,
   addNotification: AddNotification,
   title?: string,
+  channels?: NotificationChannels,
 ): void {
   if (workspaceId) {
     addNotification({
@@ -66,5 +104,13 @@ export function fireNotification(
       ...(title ? { title } : {}),
     });
   }
-  osNotify({ surfaceId: surfaceId || '', text, title: title || 'wmux' });
+  /* The bell entry above is recorded whatever the channels say. These switches
+     govern how a notification LEAVES the window, never whether it happened —
+     dropping the record too would make "no toasts" quietly mean "no history",
+     which is a different feature nobody asked for.
+
+     Omitted entirely rather than defaulted here, so that main can tell "a
+     caller with no prefs" from "a caller who said yes". `surface.trigger_flash`
+     is fired by main itself and has neither. */
+  osNotify({ surfaceId: surfaceId || '', text, title: title || 'wmux', ...(channels ?? {}) });
 }

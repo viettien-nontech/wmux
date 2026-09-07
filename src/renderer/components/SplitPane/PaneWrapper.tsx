@@ -50,6 +50,9 @@ export default function PaneWrapper({
   const notifications = useStore((s) => s.notifications);
   const markRead = useStore((s) => s.markRead);
   const activeWorkspaceId = useStore((s) => s.activeWorkspaceId);
+  /* Settings → Notifications. Both of these were drawn and persisted and read
+     by nothing: the ring showed and flashed regardless of what the user set. */
+  const notificationPrefs = useStore((s) => s.notificationPrefs);
   const addSurface = useStore((s) => s.addSurface);
   const updateSurface = useStore((s) => s.updateSurface);
   const requestCloseSurface = useStore((s) => s.requestCloseSurface);
@@ -666,7 +669,15 @@ export default function PaneWrapper({
       />
       <div className="pane-wrapper__content">
         {renderAllSurfaces()}
-        <NotificationRing visible={hasUnread} flashing={justFired} />
+        {/* `paneRing` off hides the ring entirely, which takes the flash with
+            it — a flash is the ring animating, so there is nothing left to
+            animate. `paneFlashAnimation` off keeps the steady ring and drops
+            only the movement, for someone who wants to see WHICH pane without
+            being pulled to look. */}
+        <NotificationRing
+          visible={hasUnread && notificationPrefs.paneRing}
+          flashing={justFired && notificationPrefs.paneFlashAnimation}
+        />
         <div
           className="pane-wrapper__unfocused-overlay"
           style={{ opacity: isFocused ? 0 : 1 }}
