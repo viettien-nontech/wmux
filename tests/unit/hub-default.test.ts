@@ -94,10 +94,15 @@ describe('promotion independence', () => {
     expect(prefs.hubEnabled).toBe(true);
   });
 
-  // The mirror case: a pre-1.5.0 blob is due BOTH promotions in one load.
+  // The mirror case: a legacy blob is due BOTH promotions in one load.
+  //
+  // Stores `trace` rather than the `classic` a genuine pre-1.5.0 blob would
+  // hold, because the uiMode default is `classic` again since rev 2 — a stored
+  // `classic` coming back as `classic` proves nothing about whether the
+  // promotion ran. This value has to CHANGE for the assertion to have teeth.
   it('applies both promotions to a legacy blob and stamps both revs', async () => {
-    const { prefs, writes } = await loadWith({ uiTheme: 'dark', uiMode: 'classic', hubEnabled: false });
-    expect(prefs.uiMode).toBe('trace');
+    const { prefs, writes } = await loadWith({ uiTheme: 'dark', uiMode: 'trace', hubEnabled: false });
+    expect(prefs.uiMode).toBe('classic');
     expect(prefs.hubEnabled).toBe(true);
     const written = writes[APPEARANCE_KEY] as Record<string, number>;
     expect(written.uiModeDefaultRev).toBe(UI_MODE_DEFAULT_REV);

@@ -135,3 +135,24 @@ export function resolveStatusText(s: StatusTextInputs, t: T): string {
   // Priority 5: Default — always show something
   return t('workspaceRow.idle', 'Idle');
 }
+
+/**
+ * The working directory as the row shows it: `~/proj`, `repo · ~/proj`.
+ *
+ * Extracted from the component and given tests because it was WRONG in the most
+ * common case there is — the home directory itself rendered as `~~`. Two
+ * substitutions were applied in sequence to one string: `C:/` became `~/`, and
+ * then `/Users/<name>` in the result became `~`, so `C:/Users/My PC` collapsed
+ * to a pair of tildes and every row for a home-directory shell carried two
+ * characters of noise where a path should be.
+ *
+ * They are alternatives, not steps: a path either IS under the user profile, or
+ * it is somewhere else on a drive. Home is tried first because it is the more
+ * specific of the two.
+ */
+export function shortenCwd(cwd: string): string {
+  const slashed = cwd.replace(/\\/g, '/');
+  const home = slashed.replace(/^[A-Za-z]:\/Users\/[^/]+/, '~');
+  if (home !== slashed) return home;
+  return slashed.replace(/^[A-Za-z]:\//, '~/');
+}

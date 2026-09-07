@@ -918,8 +918,20 @@ export interface AppearancePrefs {
  * picks classic back keeps it forever.
  *
  * 1 — 1.5.0, TRACE becomes the default sidebar for everyone.
+ * 2 — this fork, TRACE goes back to being opt-in.
+ *
+ * The reason for 2 is a use report, not a taste: TRACE encodes state as colour
+ * and motion — five dot colours, two pulse rates, and a channel hue saying
+ * whether an agent is reading, writing, running or delegating — and the person
+ * reading this sidebar could not hold that legend in their head, which makes it
+ * decoration rather than information. It is still one click away in Settings
+ * for anyone who wants it; it is no longer what you get without asking.
+ *
+ * Note this promotion overrides a deliberate `trace` choice once, exactly as
+ * rev 1 overrode a deliberate `classic` one. Anyone who picks TRACE after it
+ * keeps TRACE.
  */
-export const UI_MODE_DEFAULT_REV = 1;
+export const UI_MODE_DEFAULT_REV = 2;
 
 /**
  * Same mechanism as UI_MODE_DEFAULT_REV, for `hubEnabled` — and deliberately a
@@ -949,7 +961,8 @@ export const DEFAULT_APPEARANCE_PREFS: AppearancePrefs = {
   terminalBgOpacity: 88,
   windowTransparency: false,
   windowMaterial: 'clear',
-  uiMode: 'trace',
+  // TRACE is opt-in in this fork — see UI_MODE_DEFAULT_REV rev 2.
+  uiMode: 'classic',
   uiModeDefaultRev: UI_MODE_DEFAULT_REV,
   hubEnabled: true,
   hubDefaultRev: HUB_DEFAULT_REV,

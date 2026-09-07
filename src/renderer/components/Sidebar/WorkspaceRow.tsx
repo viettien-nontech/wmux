@@ -8,7 +8,7 @@ import { claudeSessionsForWorkspace, HookActivityEntry } from '../../store/claud
 import UnreadBadge from './UnreadBadge';
 import PrStatusIcon from './PrStatusIcon';
 import { traceState, toolChannel } from './trace-signals';
-import { resolveStatusText, statusClassFor, type StatusTextInputs, type T } from './workspace-status';
+import { resolveStatusText, shortenCwd, statusClassFor, type StatusTextInputs, type T } from './workspace-status';
 
 /** Stable empty view — avoids allocating a fresh object every collapsed tick. */
 const EMPTY_AGENTS_VIEW: WorkspaceAgentsView = { lines: [], total: 0, running: 0 };
@@ -351,11 +351,7 @@ export default function WorkspaceRow({
       parts.push(`${workspace.gitBranch}${workspace.gitDirty ? '*' : ''}`);
     }
     if (workspace.cwd) {
-      const shortCwd = workspace.cwd
-        .replace(/\\/g, '/')
-        .replace(/^[A-Z]:\//i, '~/')
-        .replace(/\/Users\/[^/]+/i, '~');
-      parts.push(shortCwd);
+      parts.push(shortenCwd(workspace.cwd));
     }
     return parts.length > 0 ? parts.join(' · ') : null;
   }, [workspace.gitBranch, workspace.gitDirty, workspace.cwd]);
@@ -390,6 +386,11 @@ export default function WorkspaceRow({
         // `solidFill` restores the pre-0.35 opaque block for anyone who wants it.
         isActive && activeTabIndicator === 'solidFill' ? 'workspace-row--fill' : '',
         workspace.customColor ? 'workspace-row--custom' : '',
+        /* The one signal. Everything else about a row — running, idle, done,
+           interrupted — describes work that carries on without the user, and
+           renders identically muted; this one describes work that has STOPPED
+           until they act, so it is the only thing allowed to stand out. */
+        blockedSessions > 0 ? 'workspace-row--needs-you' : '',
         dropEdge ? `workspace-row--drop-${dropEdge}` : '',
       ].filter(Boolean).join(' ')}
       style={rowStyle}
@@ -414,7 +415,12 @@ export default function WorkspaceRow({
 
       {/* Line 1: Title */}
       <div className="workspace-row__header">
-        <span className={`workspace-row__state-dot ${stateDotClass}`} />
+        {/* TRACE only. In classic the dot said, in five colours and two pulse
+            rates, exactly what the status line one row below already says in
+            words — and a legend nobody can hold in their head is decoration.
+            TRACE keeps it because there it is a via on a copper trace and the
+            whole mode is a deliberate opt-in to that language. */}
+        {uiMode === 'trace' && <span className={`workspace-row__state-dot ${stateDotClass}`} />}
         {/* One ring per tool call. Keyed on the tool counter so React remounts
             the span and the one-shot animation replays — genuinely evented,
             rather than a loop that runs whether or not anything happened.

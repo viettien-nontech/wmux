@@ -270,6 +270,61 @@
   color: #e53935;
 }
 
+/* ─── The one signal (classic mode) ──────────────────────────────────────────
+ *
+ * Everything above encodes a state as a colour: amber running, green done, red
+ * interrupted, violet blocked. Five hues plus two pulse rates is a legend, and
+ * the person reading this sidebar reported — correctly — that they could not
+ * hold it in their head and could not watch the screen continuously either. A
+ * language nobody remembers is decoration: it costs attention and returns
+ * nothing.
+ *
+ * So classic keeps ONE distinction, the only one that asks anything of the
+ * reader: work that carries on by itself (running, idle, done, interrupted) all
+ * renders identically muted, and work that has STOPPED until they act stands
+ * out. Nothing to memorise — if something is lit, it wants you.
+ *
+ * The words are untouched: the status line still says "Running command…" or
+ * "Interrupted", so no information is lost, only its second, dimmer copy in
+ * hue. That is also why this is CSS-only — `statusClassFor` still computes the
+ * full chain, and TRACE, where the palette IS the deliberate point, still uses
+ * every class.
+ */
+:root:not([data-ui-mode='trace']) .workspace-row__status--idle,
+:root:not([data-ui-mode='trace']) .workspace-row__status--running,
+:root:not([data-ui-mode='trace']) .workspace-row__status--working,
+:root:not([data-ui-mode='trace']) .workspace-row__status--done,
+:root:not([data-ui-mode='trace']) .workspace-row__status--interrupted {
+  color: rgba(var(--ui-overlay-rgb), 0.35);
+  font-weight: 400;
+}
+
+/* The lit row. `inset` rather than a second element, because the rail beside it
+   at left:4px already means SELECTED — putting a second meaning on that one
+   element is the mistake this whole change is removing. */
+:root:not([data-ui-mode='trace']) .workspace-row--needs-you {
+  background: rgba(var(--ui-agent-blocked-rgb), 0.10);
+  box-shadow: inset 2px 0 0 var(--ui-agent-blocked);
+}
+
+:root:not([data-ui-mode='trace']) .workspace-row--needs-you:hover {
+  background: rgba(var(--ui-agent-blocked-rgb), 0.16);
+}
+
+/* No pulse anywhere in classic. Motion was the second half of the legend, and
+   it is the half that cannot be ignored while reading something else. */
+:root:not([data-ui-mode='trace']) .workspace-row__agent-dot,
+:root:not([data-ui-mode='trace']) .workspace-row__state-dot--running,
+:root:not([data-ui-mode='trace']) .workspace-row__state-dot--blocked {
+  animation: none;
+}
+
+/* A per-session dot only when that session is waiting on the user. A working
+   pane already says so in words on the same line. */
+:root:not([data-ui-mode='trace']) .workspace-row__agent-dot:not(.workspace-row__agent-dot--blocked) {
+  display: none;
+}
+
 /* THIS was the "it flattens all of it" bug. Selecting a row replaced the
    status colour — amber running / green done / red interrupted, the whole
    point of the line — with one flat overlay. Status colours now survive
@@ -1376,6 +1431,14 @@
 
 @media (prefers-reduced-motion: reduce) {
   .agent-roster__dot { animation: none; }
+}
+
+/* The roster pill already says "1 need you" in words, so its dot carries no
+   information the sentence does not — and motion is the part of a signal you
+   cannot ignore while reading something else. Classic keeps the dot as a
+   bullet and drops the breathing; the pill's own colour is the signal. */
+:root:not([data-ui-mode='trace']) .agent-roster[data-blocked='true'] .agent-roster__dot {
+  animation: none;
 }
 
 .agent-roster__count {

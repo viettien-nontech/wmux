@@ -37,8 +37,11 @@ afterEach(() => {
 });
 
 describe('default mode', () => {
-  it('ships TRACE as the default', () => {
-    expect(DEFAULT_APPEARANCE_PREFS.uiMode).toBe('trace');
+  it('ships classic as the default — TRACE is opt-in in this fork', () => {
+    // Rev 2. TRACE encodes state as colour and motion, and the person reading
+    // this sidebar could not hold that legend in their head; a language nobody
+    // remembers is decoration, not information. Still one click away.
+    expect(DEFAULT_APPEARANCE_PREFS.uiMode).toBe('classic');
   });
 
   it('is a separate axis from the theme, so it composes with light and dark', () => {
@@ -46,16 +49,18 @@ describe('default mode', () => {
     expect(trace).toMatch(/\[data-ui-theme='light'\]\[data-ui-mode='trace'\]/);
   });
 
-  it('gives a fresh install TRACE', async () => {
+  it('gives a fresh install classic', async () => {
     const { prefs } = await loadWith();
-    expect(prefs.uiMode).toBe('trace');
+    expect(prefs.uiMode).toBe('classic');
   });
 
   // The whole point of the rev: a plain default change reaches nobody, because
   // setAppearancePrefs persists the entire block and the stored 'classic' wins.
   it('promotes an existing user whose stored blob predates the rev', async () => {
-    const { prefs, writes } = await loadWith({ uiTheme: 'light', uiMode: 'classic' });
-    expect(prefs.uiMode).toBe('trace');
+    // Now in the other direction: a blob stamped by rev 1 says `trace`, and
+    // rev 2 takes it back to classic exactly once.
+    const { prefs, writes } = await loadWith({ uiTheme: 'light', uiMode: 'trace', uiModeDefaultRev: 1 });
+    expect(prefs.uiMode).toBe('classic');
     expect(prefs.uiModeDefaultRev).toBe(UI_MODE_DEFAULT_REV);
     // Promotion must be recorded on disk immediately, or it repeats every launch.
     expect((writes[APPEARANCE_KEY] as { uiModeDefaultRev: number }).uiModeDefaultRev)
@@ -63,22 +68,22 @@ describe('default mode', () => {
   });
 
   it('keeps every other stored preference while promoting', async () => {
-    const { prefs } = await loadWith({ uiTheme: 'light', terminalBgOpacity: 40, uiMode: 'classic' });
+    const { prefs } = await loadWith({ uiTheme: 'light', terminalBgOpacity: 40, uiMode: 'trace', uiModeDefaultRev: 1 });
     expect(prefs.uiTheme).toBe('light');
     expect(prefs.terminalBgOpacity).toBe(40);
   });
 
-  // The promotion is one-time, so choosing classic afterwards has to stick —
+  // The promotion is one-time, so choosing TRACE afterwards has to stick —
   // otherwise wmux overrides the user on every launch, which is worse than
   // never having changed the default at all.
-  it('leaves a post-promotion classic choice alone', async () => {
-    const { prefs, writes } = await loadWith({ uiMode: 'classic', uiModeDefaultRev: UI_MODE_DEFAULT_REV });
-    expect(prefs.uiMode).toBe('classic');
+  it('leaves a post-promotion TRACE choice alone', async () => {
+    const { prefs, writes } = await loadWith({ uiMode: 'trace', uiModeDefaultRev: UI_MODE_DEFAULT_REV });
+    expect(prefs.uiMode).toBe('trace');
     // A write may still happen — this blob predates the 2.3.0 agent-office rev
     // and is due THAT promotion (see hub-default.test.ts). What must hold is
     // that a settled uiMode is never rewritten by somebody else's migration.
     const written = writes[APPEARANCE_KEY] as { uiMode?: string } | undefined;
-    if (written) expect(written.uiMode).toBe('classic');
+    if (written) expect(written.uiMode).toBe('trace');
   });
 });
 

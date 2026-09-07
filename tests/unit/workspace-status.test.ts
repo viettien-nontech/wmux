@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { resolveStatusText, statusClassFor, StatusTextInputs } from '../../src/renderer/components/Sidebar/workspace-status';
+import { resolveStatusText, statusClassFor, shortenCwd, StatusTextInputs } from '../../src/renderer/components/Sidebar/workspace-status';
 
 /** The component passes the real translator; the fallback text is what we assert on. */
 const t = ((_key: string, fallback?: string) => fallback ?? _key) as never;
@@ -130,5 +130,36 @@ describe('statusClassFor — the colour must not contradict the words', () => {
     expect(statusClassFor(inputs({ shellState: 'interrupted' }))).toBe('workspace-row__status--interrupted');
     expect(statusClassFor(inputs({ shellState: 'idle' }))).toBe('workspace-row__status--done');
     expect(statusClassFor(inputs())).toBe('workspace-row__status--idle');
+  });
+});
+
+// ─── the path on line 3 ──────────────────────────────────────────────────────
+
+describe('shortenCwd', () => {
+  it('renders the home directory as ONE tilde', () => {
+    // The bug this exists for. `C:/Users/My PC` became `~/Users/My PC` and then
+    // `~~`: two rules fired on one string, and every row for a shell sitting in
+    // the home directory carried a pair of tildes where a path should be.
+    expect(shortenCwd('C:\\Users\\My PC')).toBe('~');
+    expect(shortenCwd('C:/Users/My PC')).toBe('~');
+  });
+
+  it('shortens a path under the profile to ~/...', () => {
+    expect(shortenCwd('C:\\Users\\My PC\\wmux-fork')).toBe('~/wmux-fork');
+    expect(shortenCwd('D:/Users/alice/src/app')).toBe('~/src/app');
+  });
+
+  it('leaves a path that is not under the profile on its own drive root', () => {
+    // Unchanged behaviour, deliberately: this rendering predates the fix and
+    // rewriting what a non-home path looks like is a separate decision.
+    expect(shortenCwd('C:\\work\\thing')).toBe('~/work/thing');
+  });
+
+  it('passes a POSIX path through untouched', () => {
+    expect(shortenCwd('/home/alice/src')).toBe('/home/alice/src');
+  });
+
+  it('does not mistake a directory merely NAMED Users', () => {
+    expect(shortenCwd('C:\\data\\Users\\report')).toBe('~/data/Users/report');
   });
 });
