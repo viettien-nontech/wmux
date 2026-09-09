@@ -48,6 +48,17 @@ wmux browser screenshot      # capture PNG
   attachment target is nondeterministic, and teardown from another client can disrupt the wmux
   window. Use `wmux browser …` for panel automation.
 
+  What ignoring that actually looks like, so it is recognised rather than rediscovered: a raw
+  `ws://localhost:9222/devtools/page/1` client answers two or three commands, and then a fresh
+  connection opens fine and **hangs at `Runtime.enable`** — no reply, no error, no close. By that
+  point `/json/list` and the panel have DIVERGED: the proxy still advertised one page target on
+  the app the client had been driving, while `wmux browser eval "location.href"` on the only
+  browser surface reported an unrelated site, and a `wmux browser screenshot` confirmed the
+  panel was showing that second site. Neither view is trustworthy while a second client is
+  attached, so don't debug the disagreement — drop the other client. Recovery is
+  `wmux browser open <url> [--surface <id>]`; the webview keeps its cookies, so a session the
+  user logged into by hand survives the round trip and does not need logging in again.
+
 ## Framework-specific input recipes
 
 - **React controlled inputs** ignore a plain `.value =` assignment. Use the native setter, then
