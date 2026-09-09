@@ -354,9 +354,11 @@ Use this format:
 ```
 
 If an agent's mission involves driving the wmux **browser panel** (web testing, SPA interaction,
-form filling), append the contents of
-`$PLUGIN_ROOT/skills/orchestrate/references/browser-driving.md` to its prompt — it documents the
-CLI's sharp edges (eval scoping, ref format, framework-specific input recipes).
+form filling) — or puts any CDP client on a port, such as a chrome-devtools MCP — append the
+contents of `$PLUGIN_ROOT/skills/orchestrate/references/browser-driving.md` to its prompt. It
+documents the CLI's sharp edges (eval scoping, ref format, framework-specific input recipes) and
+the one that bites agents who never meant to touch the panel: **wmux owns `9222`**, and a second
+CDP client there hangs at `Runtime.enable` while `/json/list` and the panel report different pages.
 
 ### 6d. Create wmux layout (if available)
 
