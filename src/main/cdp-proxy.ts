@@ -2,6 +2,13 @@
 import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { webContents } from 'electron';
+import {
+  TargetMultiplexer,
+  parseDebuggerPath,
+  targetIdForWcId,
+  wcIdFromTargetId,
+} from './cdp-target-multiplexer';
+import { SharedDomains } from './cdp-shared-domains';
 
 const DEFAULT_PORT = 9222;
 const MAX_PORT = 9230;
@@ -52,6 +59,12 @@ export function isAllowedCdpOrigin(origin: string | undefined): boolean {
   return false;
 }
 
+/** A connected browser-level client, as the proxy needs to notify it. */
+interface BrowserClient {
+  onTargetAdded(wcId: number): void;
+  onTargetRemoved(wcId: number): void;
+}
+
 export class CDPProxy {
   private server: http.Server | null = null;
   private wss: WebSocketServer | null = null;
@@ -66,25 +79,83 @@ export class CDPProxy {
    * every reader, including the test written to catch exactly this.
    */
   private port: number | null = null;
-  private webContentsId: number | null = null;
-  private activeWs: WebSocket | null = null;
+  /**
+   * Every attached browser pane, in attach order.
+   *
+   * This used to be a single `webContentsId`, which is what made two CDP
+   * clients on this port fight: whichever pane attached last owned the one
+   * advertised target, and closing that pane set the field to null and took the
+   * endpoint away from everyone — including clients driving a pane that was
+   * still open. A Set both keeps the survivors and gives the Target domain
+   * something to enumerate.
+   */
+  private targets = new Set<number>();
+  private sockets = new Set<WebSocket>();
+  private browserClients = new Set<BrowserClient>();
 
-  setWebContentsId(wcId: number | null): void {
-    this.webContentsId = wcId;
+  /**
+   * Who holds which CDP domain on which pane — ONE ledger for the whole proxy.
+   *
+   * Not per connection, because what it describes is not per connection: a pane
+   * has a single real debugger session and `Runtime.enable` is state ON that
+   * session. Give each client its own ledger and both believe they turned
+   * Runtime on, the second is never told the page's execution contexts, and
+   * puppeteer waits for a main-world context that never comes.
+   */
+  private domains = new SharedDomains();
+
+  /** A browser pane attached. */
+  addTarget(wcId: number): void {
+    if (this.targets.has(wcId)) return;
+    this.targets.add(wcId);
+    for (const client of this.browserClients) client.onTargetAdded(wcId);
   }
 
+  /** A browser pane went away. Everyone else keeps theirs. */
+  removeTarget(wcId: number): void {
+    if (!this.targets.delete(wcId)) return;
+    for (const client of this.browserClients) client.onTargetRemoved(wcId);
+  }
+
+  /**
+   * The pane a target-less client gets.
+   *
+   * Kept for `/devtools/page/<id>` sockets whose id names no live pane — a raw
+   * client holding a URL from an older `/json/list`. Deliberately NOT used by
+   * the browser socket, where guessing is the bug.
+   */
   get currentWebContentsId(): number | null {
-    return this.webContentsId;
+    const live = [...this.targets];
+    return live.length > 0 ? live[live.length - 1] : null;
   }
 
-  private getPageInfo(): { title: string; url: string } {
-    if (!this.webContentsId) return { title: '', url: '' };
+  /** Attached panes, for tests and for the Target domain. */
+  get attachedTargets(): number[] {
+    return [...this.targets];
+  }
+
+  private infoFor(wcId: number): { title: string; url: string } | null {
     try {
-      const wc = webContents.fromId(this.webContentsId);
-      return { title: wc?.getTitle() || '', url: wc?.getURL() || '' };
+      const wc = webContents.fromId(wcId);
+      if (!wc || wc.isDestroyed()) return null;
+      return { title: wc.getTitle() || '', url: wc.getURL() || '' };
     } catch {
-      return { title: '', url: '' };
+      return null;
     }
+  }
+
+  private browserVersion(): {
+    protocolVersion: string; product: string; revision: string; userAgent: string; jsVersion: string;
+  } {
+    const chrome = process.versions.chrome || '0.0.0.0';
+    const chromeMajor = chrome.split('.')[0];
+    return {
+      protocolVersion: '1.3',
+      product: `Chrome/${chrome}`,
+      revision: '',
+      userAgent: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeMajor}.0.0.0 Safari/537.36`,
+      jsVersion: (process.versions.v8 || '').split('-')[0],
+    };
   }
 
   async start(): Promise<void> {
@@ -118,16 +189,23 @@ export class CDPProxy {
       }
 
       if (req.url === '/json/list' || req.url === '/json') {
-        const page = this.getPageInfo();
-        res.end(JSON.stringify([{
-          description: '',
-          devtoolsFrontendUrl: '',
-          id: '1',
-          type: 'page',
-          title: page.title,
-          url: page.url,
-          webSocketDebuggerUrl: `ws://localhost:${this.port}/devtools/page/1`,
-        }]));
+        // One entry per open browser pane. Chrome lists every tab here and so
+        // do we; a single hard-coded `id: '1'` was the reason a second pane was
+        // invisible to anything that read this endpoint.
+        const pages = [...this.targets].flatMap((wcId) => {
+          const info = this.infoFor(wcId);
+          if (!info) return [];
+          return [{
+            description: '',
+            devtoolsFrontendUrl: '',
+            id: targetIdForWcId(wcId),
+            type: 'page',
+            title: info.title,
+            url: info.url,
+            webSocketDebuggerUrl: `ws://localhost:${this.port}/devtools/page/${targetIdForWcId(wcId)}`,
+          }];
+        });
+        res.end(JSON.stringify(pages));
         return;
       }
 
@@ -152,56 +230,29 @@ export class CDPProxy {
         isAllowedCdpHost(info.req.headers.host) && isAllowedCdpOrigin(info.req.headers.origin),
     });
 
-    this.wss.on('connection', (ws) => {
-      if (!this.webContentsId) {
+    this.wss.on('connection', (ws, req) => {
+      // The path decides what this socket IS. Ignoring it — which is what this
+      // handler used to do — is why a browser-level client and a page-level one
+      // were treated identically and both ended up bound to one arbitrary pane.
+      const route = parseDebuggerPath(req?.url);
+      this.sockets.add(ws);
+      const forget = () => { this.sockets.delete(ws); };
+
+      if (route?.kind === 'browser') {
+        this.serveBrowserSocket(ws, forget);
+        return;
+      }
+
+      const requested = route?.kind === 'page' ? wcIdFromTargetId(route.targetId) : null;
+      // An id naming no live pane falls back to the most recent one, which is
+      // what a raw client holding a stale `/json/list` URL used to get.
+      const wcId = requested !== null && this.targets.has(requested) ? requested : this.currentWebContentsId;
+      if (wcId === null) {
+        forget();
         ws.close(1011, 'Browser panel is not open');
         return;
       }
-
-      this.activeWs = ws;
-      const wc = webContents.fromId(this.webContentsId);
-
-      if (!wc) {
-        ws.close(1011, 'Browser webContents not found');
-        return;
-      }
-
-      // Forward debugger events → WebSocket client
-      const onDebuggerMessage = (_event: any, method: string, params: any) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ method, params }));
-        }
-      };
-      wc.debugger.on('message', onDebuggerMessage);
-
-      const cleanup = () => {
-        try { wc?.debugger.removeListener('message', onDebuggerMessage); } catch {}
-        this.activeWs = null;
-      };
-
-      // Handle incoming CDP commands from WebSocket client
-      ws.on('message', async (data) => {
-        try {
-          const msg = JSON.parse(data.toString());
-          if (!wc || wc.isDestroyed() || !wc.debugger.isAttached()) {
-            ws.send(JSON.stringify({ id: msg.id, error: { code: -32000, message: 'Browser not attached' } }));
-            return;
-          }
-          try {
-            const result = await wc.debugger.sendCommand(msg.method, msg.params || {});
-            ws.send(JSON.stringify({ id: msg.id, result }));
-          } catch (err: any) {
-            ws.send(JSON.stringify({ id: msg.id, error: { code: -32000, message: err.message } }));
-          }
-        } catch {
-          // Malformed JSON — ignore
-        }
-      });
-
-      ws.on('close', cleanup);
-      ws.on('error', cleanup);
-
-      console.log('[wmux] CDP proxy: client connected');
+      this.servePageSocket(ws, wcId, forget);
     });
 
     // Safety nets: never let an 'error' event become an uncaught exception.
@@ -259,8 +310,124 @@ export class CDPProxy {
     );
   }
 
+  /** Run one page-level command against a pane, or reject the way CDP does. */
+  private async sendCommandTo(wcId: number, method: string, params: unknown): Promise<unknown> {
+    const wc = webContents.fromId(wcId);
+    if (!wc || wc.isDestroyed() || !wc.debugger.isAttached()) throw new Error('Browser not attached');
+    return wc.debugger.sendCommand(method, (params ?? {}) as any);
+  }
+
+  /**
+   * The multiplexed browser socket: every pane, addressed by sessionId.
+   *
+   * This is the socket `/json/version` advertises, and therefore the one
+   * puppeteer-core — so chrome-devtools-mcp — actually connects to.
+   */
+  private serveBrowserSocket(ws: WebSocket, forget: () => void): void {
+    const listeners = new Map<number, (event: any, method: string, params: any) => void>();
+    const mux = new TargetMultiplexer({
+      listTargets: () => [...this.targets],
+      infoFor: (wcId) => this.infoFor(wcId),
+      send: (message) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
+      },
+      sendCommand: (wcId, method, params) => this.sendCommandTo(wcId, method, params),
+      version: () => this.browserVersion(),
+      domains: this.domains,
+    });
+
+    const listen = (wcId: number): void => {
+      if (listeners.has(wcId)) return;
+      try {
+        const wc = webContents.fromId(wcId);
+        if (!wc || wc.isDestroyed()) return;
+        const onMessage = (_e: any, method: string, params: any) => mux.onPageEvent(wcId, method, params);
+        wc.debugger.on('message', onMessage);
+        listeners.set(wcId, onMessage);
+      } catch {
+        // A pane that died between listing and listening simply has no events.
+      }
+    };
+    const unlisten = (wcId: number): void => {
+      const onMessage = listeners.get(wcId);
+      if (!onMessage) return;
+      listeners.delete(wcId);
+      try { webContents.fromId(wcId)?.debugger.removeListener('message', onMessage); } catch { /* pane already gone */ }
+    };
+
+    for (const wcId of this.targets) listen(wcId);
+
+    const client: BrowserClient = {
+      onTargetAdded: (wcId) => { listen(wcId); mux.onTargetAdded(wcId); },
+      // Order matters: the multiplexer still needs the target to describe it in
+      // the detach/destroy frames, so stop listening only afterwards.
+      onTargetRemoved: (wcId) => { mux.onTargetRemoved(wcId); unlisten(wcId); },
+    };
+    this.browserClients.add(client);
+
+    const cleanup = () => {
+      this.browserClients.delete(client);
+      // Hand the domains back BEFORE dropping the listeners: these sessions may
+      // be the last holders, and only a real `disable` puts the pane back the
+      // way a client that has gone away found it.
+      void mux.dispose().finally(() => {
+        for (const wcId of [...listeners.keys()]) unlisten(wcId);
+      });
+      forget();
+    };
+
+    ws.on('message', (data) => {
+      let msg: unknown;
+      try { msg = JSON.parse(data.toString()); } catch { return; }
+      void mux.handle(msg);
+    });
+    ws.on('close', cleanup);
+    ws.on('error', cleanup);
+
+    console.log('[wmux] CDP proxy: browser client connected');
+  }
+
+  /** A direct socket onto one pane — the shape `/json/list` advertises. */
+  private servePageSocket(ws: WebSocket, wcId: number, forget: () => void): void {
+    const wc = webContents.fromId(wcId);
+    if (!wc) {
+      forget();
+      ws.close(1011, 'Browser webContents not found');
+      return;
+    }
+
+    const onDebuggerMessage = (_event: any, method: string, params: any) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ method, params }));
+    };
+    wc.debugger.on('message', onDebuggerMessage);
+
+    const cleanup = () => {
+      try { wc.debugger.removeListener('message', onDebuggerMessage); } catch { /* pane already gone */ }
+      forget();
+    };
+
+    ws.on('message', async (data) => {
+      let msg: any;
+      try { msg = JSON.parse(data.toString()); } catch { return; }
+      try {
+        const result = await this.sendCommandTo(wcId, msg.method, msg.params);
+        ws.send(JSON.stringify({ id: msg.id, result }));
+      } catch (err: any) {
+        ws.send(JSON.stringify({ id: msg.id, error: { code: -32000, message: err.message } }));
+      }
+    });
+    ws.on('close', cleanup);
+    ws.on('error', cleanup);
+
+    console.log(`[wmux] CDP proxy: page client connected (${targetIdForWcId(wcId)})`);
+  }
+
   stop(): void {
-    this.activeWs?.close();
+    // Every socket, not just the last one to connect. The old single `activeWs`
+    // left earlier clients holding an open connection to a stopped proxy.
+    for (const ws of this.sockets) { try { ws.close(); } catch { /* already closed */ } }
+    this.sockets.clear();
+    this.browserClients.clear();
     this.wss?.close();
     this.server?.close();
     this.server = null;

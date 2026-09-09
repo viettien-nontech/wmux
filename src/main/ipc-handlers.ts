@@ -808,16 +808,22 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
       // surfaceId/workspaceId let main route per-caller browser commands to the
       // right pane so concurrent agents don't collide (issue #62).
       cdpBridge.attach(webContentsId, surfaceId, workspaceId);
-      cdpProxyInstance?.setWebContentsId(webContentsId);
+      // ADDS a target rather than replacing the proxy's only one. The old
+      // `setWebContentsId` meant the newest pane silently stole 9222 from
+      // whoever was already driving through it.
+      cdpProxyInstance?.addTarget(webContentsId);
     },
   );
   ipcMain.on(IPC_CHANNELS.CDP_DETACH, (_event, webContentsId?: number) => {
     // Detach only this pane's own target — other open browsers keep their
     // independent connections (issues #27, #62).
     cdpBridge.detach(webContentsId);
-    if (webContentsId === undefined || cdpProxyInstance?.currentWebContentsId === webContentsId) {
-      cdpProxyInstance?.setWebContentsId(null);
-    }
+    // Same rule on the proxy. This used to null the single pointer whenever the
+    // closing pane happened to be the one it held, which took the CDP endpoint
+    // away from clients driving panes that were still open — closing one
+    // session's browser blanked the other session's.
+    const closing = webContentsId ?? cdpProxyInstance?.currentWebContentsId ?? undefined;
+    if (closing !== undefined) cdpProxyInstance?.removeTarget(closing);
   });
 
   /**
