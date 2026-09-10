@@ -55,6 +55,13 @@ export class TargetRegistry {
     const cu = this.targetTheoWc.get(wcId);
     if (cu && cu !== targetId) this.wcTheoTarget.set(cu, null);
 
+    /* And drop the surface's OWN previous webContents. A remount normally
+       unbinds first, but nothing guarantees the order, and a stale reverse
+       entry means a webContents id Electron later hands to someone else still
+       resolves to this target. Raised in review. */
+    const wcCu = this.wcTheoTarget.get(targetId);
+    if (typeof wcCu === 'number' && wcCu !== wcId) this.targetTheoWc.delete(wcCu);
+
     this.wcTheoTarget.set(targetId, wcId);
     this.targetTheoWc.set(wcId, targetId);
     return targetId;

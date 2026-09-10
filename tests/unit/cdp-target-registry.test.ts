@@ -177,3 +177,43 @@ describe('TargetRegistry — identity survives a remount', () => {
     expect(r.wcIdFor(a)).toBeNull();
   });
 });
+
+/*
+ * Re-binding a live surface, without an unbind in between.
+ *
+ * Raised in review. `bind` dropped the reverse entry of whoever ELSE held that
+ * webContents, but not the surface's own previous one — so after
+ * `bind('s',10); bind('s',99)` the registry still answered target `s` for
+ * webContents 10, and `surfaceGone('s')` cleaned up only 99. A webContents id
+ * that Electron later reuses would then resolve to a target that is gone.
+ */
+describe('TargetRegistry — re-binding without an unbind first', () => {
+  it('forgets the webContents the surface used to be on', () => {
+    const r = new TargetRegistry();
+    r.bind('surf-a', 10);
+
+    r.bind('surf-a', 99);
+
+    expect(r.targetIdFor(10)).toBeNull();
+    expect(r.liveWcIds()).toEqual([99]);
+  });
+
+  it('leaves nothing behind once that surface is gone', () => {
+    const r = new TargetRegistry();
+    r.bind('surf-a', 10);
+    r.bind('surf-a', 99);
+
+    r.surfaceGone('surf-a');
+
+    expect(r.liveWcIds()).toEqual([]);
+    expect(r.targetIdFor(10)).toBeNull();
+    expect(r.targetIdFor(99)).toBeNull();
+  });
+
+  it('still keeps the same identity', () => {
+    const r = new TargetRegistry();
+    const id = r.bind('surf-a', 10);
+
+    expect(r.bind('surf-a', 99)).toBe(id);
+  });
+});

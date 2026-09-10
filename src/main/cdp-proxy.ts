@@ -131,12 +131,23 @@ export class CDPProxy {
    * rebind: same identity, new webContents, and clients are told nothing.
    */
   addTarget(wcId: number, surfaceId?: string | null): void {
-    /* No surface id means a caller that predates identity-by-surface. Fall back
-       to the webContents id so such a pane still gets a stable-enough handle
-       rather than none at all. */
-    const surface = surfaceId || `wc-${wcId}`;
-    const laMoi = this.registry.targetIdForSurface(surface) === null;
-    this.registry.bind(surface, wcId);
+    /*
+     * A surface id is REQUIRED, and there is deliberately no fallback.
+     *
+     * Keying on the webContents id when one is missing would keep the exact
+     * dependency this class exists to remove — `addTarget(10, null)` then
+     * `addTarget(99, null)` for one pane mints two identities, which is the
+     * original bug wearing a different name. Raised in review, and the honest
+     * answer is that the only caller (`CDP_ATTACH`, from `BrowserPane`) always
+     * has one: a surface id is a prop of the component, not a lucky extra.
+     * Refusing loudly beats a silent half-fix.
+     */
+    if (!surfaceId) {
+      console.warn(`[wmux] CDP proxy: refusing to register webContents ${wcId} with no surface id`);
+      return;
+    }
+    const laMoi = this.registry.targetIdForSurface(surfaceId) === null;
+    this.registry.bind(surfaceId, wcId);
     this.targets.add(wcId);
     for (const client of this.browserClients) {
       if (laMoi) client.onTargetAdded(wcId);

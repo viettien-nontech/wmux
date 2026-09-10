@@ -116,15 +116,32 @@ let sessionCounter = 0;
  * B's sessions are keyed to B's own targets and are untouched.
  */
 export class TargetMultiplexer {
-  private sessions = new Map<string, number>();
+  /** sessionId -> targetId. Identity, so a session survives a remount. */
+  private sessions = new Map<string, string>();
   private autoAttach = false;
   private discovering = false;
 
   constructor(private deps: MultiplexerDeps) {}
 
-  /** Sessions this connection holds, as `sessionId → wcId`. Test seam. */
-  get openSessions(): ReadonlyMap<string, number> {
+  /**
+   * Sessions this connection holds, as `sessionId → targetId`. Test seam.
+   *
+   * TARGET id, not webContents id, and that is the whole point: a webContents
+   * does not survive a remount. Keyed on the webContents, a session outlived
+   * its own binding — later commands went to a dead webContents, and closing
+   * the surface looked for sessions by the CURRENT id, found none, and
+   * destroyed the target leaving the session dangling with no
+   * `Target.detachedFromTarget` to tell the client. Found in review.
+   */
+  get openSessions(): ReadonlyMap<string, string> {
     return this.sessions;
+  }
+
+  /** Where a session's commands and events go RIGHT NOW. Null while detached. */
+  private wcIdOfSession(sessionId: string): number | null {
+    const targetId = this.sessions.get(sessionId);
+    if (!targetId) return null;
+    return this.deps.wcIdForTargetId(targetId);
   }
 
   private targetInfo(wcId: number): CdpTargetInfo | null {
@@ -137,7 +154,7 @@ export class TargetMultiplexer {
       type: 'page',
       title: info.title,
       url: info.url,
-      attached: [...this.sessions.values()].includes(wcId),
+      attached: [...this.sessions.values()].includes(targetId),
       canAccessOpener: false,
     };
   }
@@ -153,7 +170,11 @@ export class TargetMultiplexer {
 
   private openSession(wcId: number): string {
     const sessionId = `wmux-session-${wcId}-${++sessionCounter}`;
-    this.sessions.set(sessionId, wcId);
+    const targetId = this.deps.targetIdFor(wcId);
+    /* No identity means no session: a session that cannot name its target is
+       one nothing can route, detach or clean up. */
+    if (!targetId) return sessionId;
+    this.sessions.set(sessionId, targetId);
     return sessionId;
   }
 
@@ -184,8 +205,10 @@ export class TargetMultiplexer {
    * target stops existing.
    */
   onTargetRemoved(wcId: number, targetId: string): void {
-    for (const [sessionId, boundWcId] of [...this.sessions]) {
-      if (boundWcId !== wcId) continue;
+    /* Matched on the TARGET. The pane may have been closed while detached, in
+       which case there is no current webContents to match on at all. */
+    for (const [sessionId, boundTargetId] of [...this.sessions]) {
+      if (boundTargetId !== targetId) continue;
       this.sessions.delete(sessionId);
       this.deps.send({ method: 'Target.detachedFromTarget', params: { sessionId, targetId } });
     }
@@ -210,8 +233,9 @@ export class TargetMultiplexer {
     this.deps.domains.noteEvent(wcId, method, params);
     const domain = method.split('.')[0];
     const gated = this.deps.domains.isGated(wcId, domain);
-    for (const [sessionId, boundWcId] of this.sessions) {
-      if (boundWcId !== wcId) continue;
+    const targetId = this.deps.targetIdFor(wcId);
+    for (const [sessionId, boundTargetId] of this.sessions) {
+      if (boundTargetId !== targetId) continue;
       if (gated && !this.deps.domains.holds(wcId, sessionId, domain)) continue;
       this.deps.send({ sessionId, method, params });
     }
@@ -225,9 +249,13 @@ export class TargetMultiplexer {
    * pinned in whatever state a client that no longer exists asked for.
    */
   async dispose(): Promise<void> {
-    for (const [sessionId, wcId] of [...this.sessions]) {
+    for (const [sessionId] of [...this.sessions]) {
+      const wcId = this.wcIdOfSession(sessionId);
       this.sessions.delete(sessionId);
-      await this.releaseSessionDomains(wcId, sessionId);
+      /* A detached session has no pane to send a `disable` to — the webContents
+         it held is gone, and releasing on a new one would turn a domain off for
+         whoever holds it there now. */
+      if (wcId !== null) await this.releaseSessionDomains(wcId, sessionId);
     }
   }
 
@@ -308,9 +336,24 @@ export class TargetMultiplexer {
 
     // A frame carrying a sessionId is for a page, not for the browser.
     if (sessionId !== undefined) {
-      const wcId = this.sessions.get(sessionId);
-      if (wcId === undefined) {
+      /*
+       * Two different answers, kept apart on purpose.
+       *
+       * A session nobody opened is a client mistake. A session whose pane is
+       * mid-remount is nobody's mistake — the surface is alive, its webContents
+       * just is not, for a few milliseconds. Reporting the second as "no such
+       * session" tells the client to give up on a session that is about to work
+       * again.
+       */
+      if (!this.sessions.has(sessionId)) {
         this.reply(id, sessionId, { error: { code: CDP_SERVER_ERROR, message: `No session with id ${sessionId}` } });
+        return;
+      }
+      const wcId = this.wcIdOfSession(sessionId);
+      if (wcId === null) {
+        this.reply(id, sessionId, {
+          error: { code: CDP_SERVER_ERROR, message: `Session ${sessionId} is not attached to a pane right now` },
+        });
         return;
       }
       const gate = DOMAIN_GATE.exec(method);
@@ -366,7 +409,7 @@ export class TargetMultiplexer {
           for (const info of this.allTargetInfos()) {
             const wcId = this.deps.wcIdForTargetId(info.targetId);
             if (wcId === null) continue;
-            if ([...this.sessions.values()].includes(wcId)) continue;
+            if ([...this.sessions.values()].includes(info.targetId)) continue;
             this.emitAttached(this.openSession(wcId), info);
           }
         }
@@ -391,7 +434,7 @@ export class TargetMultiplexer {
 
       case 'Target.detachFromTarget': {
         const target = params?.sessionId;
-        const wcId = typeof target === 'string' ? this.sessions.get(target) : undefined;
+        const wcId = typeof target === 'string' ? (this.wcIdOfSession(target) ?? undefined) : undefined;
         if (wcId === undefined) {
           this.reply(id, undefined, { error: { code: CDP_INVALID_PARAMS, message: 'No session with given id found' } });
           return;

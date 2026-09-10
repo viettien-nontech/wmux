@@ -202,7 +202,7 @@ describe('TargetMultiplexer — closing one pane leaves the others alone (the bu
     await mux.handle({ id: 1, method: 'Target.setDiscoverTargets', params: { discover: true } });
     await mux.handle({ id: 2, method: 'Target.setAutoAttach', params: { autoAttach: true } });
     const sessionFor = (wcId: number) =>
-      [...mux.openSessions].find(([, id]) => id === wcId)?.[0];
+      [...mux.openSessions].find(([, id]) => id === idOf(wcId))?.[0];
     const sessionNine = sessionFor(9);
     sent.length = 0;
 
@@ -220,7 +220,7 @@ describe('TargetMultiplexer — closing one pane leaves the others alone (the bu
   it('keeps driving the surviving pane after the other one closed', async () => {
     const { mux, sent, commands, idOf } = harness({ 5: { title: 'one', url: 'u1' }, 9: { title: 'two', url: 'u2' } });
     await mux.handle({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true } });
-    const sessionNine = [...mux.openSessions].find(([, id]) => id === 9)![0];
+    const sessionNine = [...mux.openSessions].find(([, id]) => id === idOf(9))![0];
 
     mux.onTargetRemoved(5, idOf(5));
     await mux.handle({ id: 2, sessionId: sessionNine, method: 'Page.reload' });
@@ -244,7 +244,7 @@ describe('TargetMultiplexer — closing one pane leaves the others alone (the bu
     expect(aSessions.some((s) => bSessions.includes(s))).toBe(false);
 
     // A detaches from pane 5. B still has its own session for pane 5.
-    const aFive = [...a.mux.openSessions].find(([, id]) => id === 5)![0];
+    const aFive = [...a.mux.openSessions].find(([, id]) => id === a.idOf(5))![0];
     await a.mux.handle({ id: 2, method: 'Target.detachFromTarget', params: { sessionId: aFive } });
     expect(a.mux.openSessions.size).toBe(1);
     expect(b.mux.openSessions.size).toBe(2);
@@ -475,5 +475,82 @@ describe('announcements land before the reply that caused them', () => {
 
     expect(framesOf(h.sent, 'Target.targetCreated')).toHaveLength(0);
     expect(posOfReply(h.sent, 5)).toBe(0);
+  });
+});
+
+/*
+ * A session has to follow its SURFACE, not the webContents it started on.
+ *
+ * Found by the second AI in review, and it is the half the identity fix left
+ * undone: target ids survive a remount, but `sessions` still mapped a session
+ * to the webContents id it was opened against. So after a remount
+ *
+ *   - a command on that session is sent to a webContents that is GONE, and
+ *   - closing the surface looks for sessions by the CURRENT webContents id,
+ *     finds none, and destroys the target while leaving the session dangling
+ *     with no `Target.detachedFromTarget` to tell the client.
+ *
+ * The acceptance run missed it because every client there connected fresh —
+ * attach, drive, disconnect — and never held a session across a remount, which
+ * is exactly the case the fix exists for.
+ */
+describe('a session survives its pane being remounted', () => {
+  /** What a remount does: same surface, new webContents. */
+  function remount(h: ReturnType<typeof harness>, cu: number, moi: number) {
+    h.panes[moi] = h.panes[cu];
+    delete h.panes[cu];
+    h.registry.unbind(cu);
+    h.registry.bind(`surf-${cu}`, moi);
+  }
+
+  it('sends a later command to the NEW webContents', async () => {
+    const h = harness({ 4: { title: 'a', url: 'u' } });
+    const sessionId = await attach(h, h.idOf(4));
+
+    remount(h, 4, 44);
+    await h.mux.handle({ id: 7, method: 'Runtime.evaluate', params: { expression: '1' }, sessionId });
+
+    expect(h.commands.map((c) => c.wcId)).toEqual([44]);
+  });
+
+  it('keeps the same target id across the remount', () => {
+    const h = harness({ 4: { title: 'a', url: 'u' } });
+    const truoc = h.idOf(4);
+
+    remount(h, 4, 44);
+
+    expect(h.registry.targetIdFor(44)).toBe(truoc);
+  });
+
+  it('detaches that session when the surface finally closes', async () => {
+    const h = harness({ 4: { title: 'a', url: 'u' } });
+    const targetId = h.idOf(4);
+    // Discovery on, like a real client: `targetDestroyed` is only owed to a
+    // client that asked to be told about targets in the first place.
+    await h.mux.handle({ id: 99, method: 'Target.setDiscoverTargets', params: { discover: true } });
+    const sessionId = await attach(h, targetId);
+    remount(h, 4, 44);
+    h.sent.length = 0;
+
+    h.mux.onTargetRemoved(44, targetId);
+
+    const detached = framesOf(h.sent, 'Target.detachedFromTarget');
+    expect(detached).toHaveLength(1);
+    expect(detached[0].params.sessionId).toBe(sessionId);
+    expect(framesOf(h.sent, 'Target.targetDestroyed')).toHaveLength(1);
+  });
+
+  it('detaches it even when the pane is closed while detached', async () => {
+    // surfaceGone straight after unbind: there is no current webContents at
+    // all, so the proxy has none to pass. Identity still has to be enough.
+    const h = harness({ 4: { title: 'a', url: 'u' } });
+    const targetId = h.idOf(4);
+    const sessionId = await attach(h, targetId);
+    h.registry.unbind(4);
+    h.sent.length = 0;
+
+    h.mux.onTargetRemoved(-1, targetId);
+
+    expect(framesOf(h.sent, 'Target.detachedFromTarget').map((f) => f.params.sessionId)).toEqual([sessionId]);
   });
 });
