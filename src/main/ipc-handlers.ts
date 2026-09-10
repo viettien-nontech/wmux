@@ -28,7 +28,7 @@ import { loadUserConfig, getConfigPath, resetConfigWarnings } from './user-confi
 import { loadUserLocales } from './user-locales';
 import { WindowManager, supportsBackdropMaterial, supportsTransparency, toWindowMaterial } from './window-manager';
 import { CDPBridge } from './cdp-bridge';
-import { CDPProxy } from './cdp-proxy';
+import { CDPProxy, danhSachSurfaceHopLe } from './cdp-proxy';
 import { AgentManager } from './agent-manager';
 import { saveNamedSession, loadNamedSession, listNamedSessions, deleteNamedSession, loadSession } from './session-persistence';
 import { listDir, resolveInRoot, isExecutablePath } from './explorer-fs';
@@ -489,6 +489,11 @@ const agentBrowserDeps: AgentBrowserDeps = {
 };
 
 export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstance?: CDPProxy): void {
+  /* Windows already carrying a `destroyed` listener for the CDP sweep. Every
+     browser pane attaches, so without this a window with eight panes would
+     register eight identical listeners and hit Node's max-listeners warning. */
+  const ownerDangTheoDoi = new Set<number>();
+
   // Toggle DevTools for the renderer window
   ipcMain.on('toggle-devtools', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
@@ -805,6 +810,21 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
   ipcMain.on(
     IPC_CHANNELS.CDP_ATTACH,
     (_event, webContentsId: number, surfaceId?: string | null, workspaceId?: string | null) => {
+      /*
+       * `_event.sender` is the WINDOW this pane belongs to, and the proxy needs
+       * it: a renderer can only ever state which surfaces IT has, so a sweep
+       * driven by one window must not touch another's. Its death is also the
+       * only signal that its surfaces are gone for good — nobody will ever list
+       * them again.
+       */
+      const owner = _event.sender;
+      if (!ownerDangTheoDoi.has(owner.id)) {
+        ownerDangTheoDoi.add(owner.id);
+        owner.once('destroyed', () => {
+          ownerDangTheoDoi.delete(owner.id);
+          cdpProxyInstance?.windowGone(owner.id);
+        });
+      }
       // surfaceId/workspaceId let main route per-caller browser commands to the
       // right pane so concurrent agents don't collide (issue #62).
       cdpBridge.attach(webContentsId, surfaceId, workspaceId);
@@ -814,7 +834,7 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
       //
       // The surface id is what makes the target's IDENTITY survive a remount:
       // a webContents does not. See `cdp-target-registry.ts`.
-      cdpProxyInstance?.addTarget(webContentsId, surfaceId ?? null);
+      cdpProxyInstance?.addTarget(webContentsId, surfaceId ?? null, owner.id);
     },
   );
   ipcMain.on(IPC_CHANNELS.CDP_DETACH, (_event, webContentsId?: number) => {
@@ -852,13 +872,14 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
    * mounts and attaches, then the restored tree replaces it, and the panes that
    * vanish never reach a close action. Measured: 5 targets, 2 real panes.
    *
-   * The array must be a real list; an `undefined` from a garbled send would
-   * otherwise mean "nothing is alive" and destroy every target on the machine.
+   * A malformed list is refused WHOLE rather than tidied up — see
+   * `danhSachSurfaceHopLe`, which is where that reasoning lives and where the
+   * tests reach it.
    */
   ipcMain.on(IPC_CHANNELS.CDP_SURFACES_ALIVE, (_event, surfaceIds: unknown) => {
-    if (!Array.isArray(surfaceIds)) return;
-    const sach = surfaceIds.filter((id): id is string => typeof id === 'string' && id !== '');
-    cdpProxyInstance?.reconcileSurfaces(sach);
+    const song = danhSachSurfaceHopLe(surfaceIds);
+    if (!song) return;
+    cdpProxyInstance?.reconcileSurfaces(song, _event.sender.id);
   });
 
   /**

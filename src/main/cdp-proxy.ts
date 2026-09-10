@@ -58,6 +58,25 @@ export function isAllowedCdpOrigin(origin: string | undefined): boolean {
   return false;
 }
 
+/**
+ * Is this really a renderer's list of live surfaces? Returns it, or null.
+ *
+ * ⛔ A MALFORMED LIST IS REFUSED WHOLE, never tidied up and acted on. Filtering
+ * the bad entries out looks defensive and is the opposite, because of what the
+ * list MEANS: it is a complete statement, so `[null]` cleans up into "nothing
+ * is alive" and closes every target, and `['s1', null]` into "only s1 is alive"
+ * and closes the rest. A partial truth is indistinguishable here from a whole
+ * one. Raised in review.
+ *
+ * An EMPTY list is valid and meaningful — the user really can close every
+ * browser pane, and that is the one case where sweeping everything is right.
+ */
+export function danhSachSurfaceHopLe(gui: unknown): string[] | null {
+  if (!Array.isArray(gui)) return null;
+  if (!gui.every((id) => typeof id === 'string' && id !== '')) return null;
+  return gui as string[];
+}
+
 /** A connected browser-level client, as the proxy needs to notify it. */
 interface BrowserClient {
   /** A surface appeared for the FIRST time: announce a new target. */
@@ -130,7 +149,19 @@ export class CDPProxy {
    * The FIRST attach for a surface announces a target. Every later one is a
    * rebind: same identity, new webContents, and clients are told nothing.
    */
-  addTarget(wcId: number, surfaceId?: string | null): void {
+  /**
+   * Which WINDOW's renderer owns each browser surface.
+   *
+   * The proxy is one object for the whole app, but a renderer knows only its
+   * OWN workspaces — so a window that states which surfaces it has is speaking
+   * for itself and for nobody else. Without this, opening a second window and
+   * touching its layout announced `targetDestroyed` for every browser pane in
+   * the FIRST window. Raised in review, and it is the same "window ≠ workspace"
+   * mistake `engineForSurface` already carries a note about.
+   */
+  private chuSoHuu = new Map<string, number>();
+
+  addTarget(wcId: number, surfaceId?: string | null, ownerWcId?: number): void {
     /*
      * A surface id is REQUIRED, and there is deliberately no fallback.
      *
@@ -146,6 +177,7 @@ export class CDPProxy {
       console.warn(`[wmux] CDP proxy: refusing to register webContents ${wcId} with no surface id`);
       return;
     }
+    if (typeof ownerWcId === 'number') this.chuSoHuu.set(surfaceId, ownerWcId);
     const laMoi = this.registry.targetIdForSurface(surfaceId) === null;
     this.registry.bind(surfaceId, wcId);
     this.targets.add(wcId);
@@ -170,6 +202,7 @@ export class CDPProxy {
   /** A browser pane is really closed. The only thing that kills a target. */
   surfaceGone(surfaceId: string): void {
     const targetId = this.registry.targetIdForSurface(surfaceId);
+    this.chuSoHuu.delete(surfaceId);
     if (!targetId) return;
     const wcId = this.registry.wcIdFor(targetId);
     this.registry.surfaceGone(surfaceId);
@@ -202,15 +235,46 @@ export class CDPProxy {
    * webContents and is perfectly alive; sweeping "targets with no webContents"
    * would re-break exactly what the detach change fixed.
    */
-  reconcileSurfaces(liveSurfaceIds: readonly string[]): string[] {
+  reconcileSurfaces(liveSurfaceIds: readonly string[], ownerWcId?: number): string[] {
     const song = new Set(liveSurfaceIds);
     const boDi: string[] = [];
     for (const surfaceId of this.registry.surfaceIds()) {
+      /*
+       * A window speaks only for its own surfaces. Omitting this made a layout
+       * change in a second window destroy every browser target in the first —
+       * a renderer cannot list what it cannot see, and silence is not a denial.
+       * An owner-less surface is left alone: it predates this bookkeeping or
+       * came from somewhere that never claimed it, and guessing is what the
+       * whole reconciliation exists to avoid.
+       */
+      if (typeof ownerWcId === 'number' && this.chuSoHuu.get(surfaceId) !== ownerWcId) continue;
       if (song.has(surfaceId)) continue;
       const targetId = this.registry.targetIdForSurface(surfaceId);
       if (targetId) boDi.push(targetId);
       // Goes through the ordinary close so clients hear `Target.targetDestroyed`
       // — a ghost that vanishes silently leaves puppeteer holding a dead page.
+      this.surfaceGone(surfaceId);
+    }
+    return boDi;
+  }
+
+  /**
+   * A whole WINDOW went away — end every target its renderer owned.
+   *
+   * Scoping the sweep per window fixed one leak and would have opened another:
+   * once nobody speaks for a closed window's surfaces, no later list can ever
+   * name them, so they would sit in the registry forever — the same shape as
+   * the startup leak this all began with. A window's death is unambiguous in a
+   * way an unmount is not, so unlike `detachTarget` this one may end targets.
+   */
+  windowGone(ownerWcId: number): string[] {
+    const cua = [...this.chuSoHuu.entries()]
+      .filter(([, chu]) => chu === ownerWcId)
+      .map(([surfaceId]) => surfaceId);
+    const boDi: string[] = [];
+    for (const surfaceId of cua) {
+      const targetId = this.registry.targetIdForSurface(surfaceId);
+      if (targetId) boDi.push(targetId);
       this.surfaceGone(surfaceId);
     }
     return boDi;

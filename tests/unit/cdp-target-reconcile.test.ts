@@ -32,7 +32,7 @@ vi.mock('electron', () => ({
   webContents: { fromId: () => undefined },
 }));
 
-import { CDPProxy } from '../../src/main/cdp-proxy';
+import { CDPProxy, danhSachSurfaceHopLe } from '../../src/main/cdp-proxy';
 import { TargetRegistry } from '../../src/main/cdp-target-registry';
 import { browserSurfaceIds, browserPanelSurfaceId } from '../../src/renderer/store/cdp-reconcile';
 import type { SplitNode, WorkspaceInfo } from '../../src/shared/types';
@@ -138,6 +138,53 @@ describe('CDPProxy.reconcileSurfaces', () => {
     expect(proxy.attachedTargets).toEqual([10, 11]);
   });
 
+  it('never touches a target belonging to ANOTHER window', () => {
+    /*
+     * Found in review, and it is the "window ≠ workspace" mistake again. The
+     * proxy is one object for the whole app while a renderer knows only its own
+     * workspaces, so window A's list says nothing whatsoever about window B's
+     * panes. Without scoping, opening a second window and touching its layout
+     * announced `targetDestroyed` for every browser pane in the first.
+     */
+    const proxy = new CDPProxy();
+    const spy = withClient(proxy);
+    proxy.addTarget(10, 's-cuaA', 100);
+    proxy.addTarget(11, 's-cuaB', 200);
+    const cuaA = proxy.targetIdFor(10);
+    const cuaB = proxy.targetIdFor(11);
+
+    // Window A restructures and now has nothing. It speaks only for itself.
+    expect(proxy.reconcileSurfaces([], 100)).toEqual([cuaA]);
+    expect(spy.removed).toEqual([cuaA]);
+    expect(proxy.targetIdFor(11)).toBe(cuaB);
+    expect(proxy.attachedTargets).toEqual([11]);
+  });
+
+  it('ends a window\'s targets when the window itself dies', () => {
+    /*
+     * The other half of scoping, and it has to exist: once nobody speaks for a
+     * closed window's surfaces, no later list can name them, so they would sit
+     * in the registry forever — the same leak this whole change is about. A
+     * window's death is unambiguous in the way an unmount is not.
+     */
+    const proxy = new CDPProxy();
+    const spy = withClient(proxy);
+    proxy.addTarget(10, 's-cuaA', 100);
+    proxy.addTarget(11, 's-cuaB', 200);
+    const cuaA = proxy.targetIdFor(10);
+
+    expect(proxy.windowGone(100)).toEqual([cuaA]);
+    expect(spy.removed).toEqual([cuaA]);
+    expect(proxy.attachedTargets).toEqual([11]);
+  });
+
+  it('leaves an owner-less surface alone rather than guessing', () => {
+    const proxy = new CDPProxy();
+    proxy.addTarget(10, 's-khong-chu'); // registered before owners were tracked
+    expect(proxy.reconcileSurfaces([], 100)).toEqual([]);
+    expect(proxy.attachedTargets).toEqual([10]);
+  });
+
   it('reports state that tells a ghost from a detached pane', () => {
     /*
      * `/json/list` cannot answer this: since the identity change it lists only
@@ -158,6 +205,34 @@ describe('CDPProxy.reconcileSurfaces', () => {
     expect(bySurface.get('s-detached')).toMatchObject({ wcId: null, attached: false });
     // Both still EXIST — the distinction the old measurement could not make.
     expect(bySurface.get('s-detached')?.targetId).toBeTruthy();
+  });
+});
+
+describe('danhSachSurfaceHopLe (the IPC boundary)', () => {
+  it('accepts a list of non-empty strings, including the empty list', () => {
+    expect(danhSachSurfaceHopLe([])).toEqual([]);
+    expect(danhSachSurfaceHopLe(['s1', 's2'])).toEqual(['s1', 's2']);
+  });
+
+  it('refuses a malformed list WHOLE rather than filtering it', () => {
+    /*
+     * Found in review, and the reason is what the list MEANS: it is a complete
+     * statement, so a cleaned-up `[null]` becomes "nothing is alive" and closes
+     * every target, and `['s1', null]` becomes "only s1 is alive" and closes
+     * the rest. Both look like a successful sweep from every side.
+     */
+    expect(danhSachSurfaceHopLe([null])).toBeNull();
+    expect(danhSachSurfaceHopLe(['s1', null])).toBeNull();
+    expect(danhSachSurfaceHopLe([123])).toBeNull();
+    expect(danhSachSurfaceHopLe([''])).toBeNull();
+    expect(danhSachSurfaceHopLe(['s1', {}])).toBeNull();
+  });
+
+  it('refuses anything that is not a list at all', () => {
+    expect(danhSachSurfaceHopLe(undefined)).toBeNull();
+    expect(danhSachSurfaceHopLe(null)).toBeNull();
+    expect(danhSachSurfaceHopLe('s1')).toBeNull();
+    expect(danhSachSurfaceHopLe({ 0: 's1', length: 1 })).toBeNull();
   });
 });
 
