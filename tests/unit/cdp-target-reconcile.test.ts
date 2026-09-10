@@ -34,7 +34,7 @@ vi.mock('electron', () => ({
 
 import { CDPProxy } from '../../src/main/cdp-proxy';
 import { TargetRegistry } from '../../src/main/cdp-target-registry';
-import { browserSurfaceIds } from '../../src/renderer/store/cdp-reconcile';
+import { browserSurfaceIds, browserPanelSurfaceId } from '../../src/renderer/store/cdp-reconcile';
 import type { SplitNode, WorkspaceInfo } from '../../src/shared/types';
 
 /** Records what a connected CDP client is told, so a silent drop fails loudly. */
@@ -171,7 +171,7 @@ describe('browserSurfaceIds (what the renderer declares)', () => {
   it('collects browser surfaces from every workspace, not just the active one', () => {
     const a = ws('w1', leaf([{ id: 'b1', type: 'browser' }, { id: 't1', type: 'terminal' }]));
     const b = ws('w2', leaf([{ id: 'b2', type: 'browser' }]));
-    expect(new Set(browserSurfaceIds([a, b]))).toEqual(new Set(['b1', 'b2']));
+    expect(new Set(browserSurfaceIds([a, b], false))).toEqual(new Set(['b1', 'b2']));
   });
 
   it('walks nested splits', () => {
@@ -179,11 +179,34 @@ describe('browserSurfaceIds (what the renderer declares)', () => {
       type: 'split',
       children: [leaf([{ id: 'b1', type: 'browser' }]), leaf([{ id: 'b2', type: 'browser' }])],
     } as unknown as SplitNode;
-    expect(new Set(browserSurfaceIds([ws('w1', nested)]))).toEqual(new Set(['b1', 'b2']));
+    expect(new Set(browserSurfaceIds([ws('w1', nested)], false))).toEqual(new Set(['b1', 'b2']));
+  });
+
+  it('includes every workspace SIDE PANEL while the panel is open', () => {
+    /*
+     * The bug the rig caught before this shipped. The side browser panel is a
+     * real BrowserPane per workspace, mounted outside the split tree — with the
+     * panel open it holds a live CDP target, and a list built from the tree
+     * alone declared it dead. Measured: 3 ghosts reported against 1 real pane,
+     * two of them open panels.
+     */
+    const a = ws('w1', leaf([{ id: 't1', type: 'terminal' }]));
+    const b = ws('w2', leaf([{ id: 'b2', type: 'browser' }]));
+
+    expect(new Set(browserSurfaceIds([a, b], true))).toEqual(
+      new Set(['b2', browserPanelSurfaceId('w1'), browserPanelSurfaceId('w2')]),
+    );
+    // Closed: nothing is mounted, so nothing is driveable and reopening
+    // re-attaches as a fresh target.
+    expect(browserSurfaceIds([a, b], false)).toEqual(['b2']);
+  });
+
+  it('mints the panel id in ONE place, so the sweep and the mount cannot drift', () => {
+    expect(browserPanelSurfaceId('ws-abc')).toBe('browser-ws-abc');
   });
 
   it('ignores non-browser surfaces entirely', () => {
     const t = ws('w1', leaf([{ id: 't1', type: 'terminal' }, { id: 'm1', type: 'markdown' }]));
-    expect(browserSurfaceIds([t])).toEqual([]);
+    expect(browserSurfaceIds([t], false)).toEqual([]);
   });
 });

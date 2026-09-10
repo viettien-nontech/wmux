@@ -34,16 +34,43 @@ function collect(node: SplitNode, out: string[]): void {
 }
 
 /**
- * Every browser surface in every workspace.
+ * The surface id of a workspace's side browser panel.
+ *
+ * ONE producer, deliberately. This panel is a real `BrowserPane` that lives
+ * OUTSIDE the split tree, so a sweep that walked only the tree would call it a
+ * ghost and destroy the CDP target of a browser the user is looking at —
+ * measured, on the first run of the rig, before this existed. Anything that
+ * mints this id by hand re-opens that hole the moment the scheme changes on
+ * one side only.
+ */
+export function browserPanelSurfaceId(workspaceId: string): string {
+  return `browser-${workspaceId}`;
+}
+
+/**
+ * Every browser surface that exists right now.
  *
  * ALL workspaces, not just the active one: a background workspace's browser
  * pane is unmounted but absolutely not closed, and reporting only the active
  * one would have main destroy the targets of every pane the user is not
  * currently looking at.
+ *
+ * `panelOpen` is the side panel's mounted state, and it is a real input rather
+ * than a convenience. With the panel open, EVERY workspace's panel is mounted
+ * (only the active one is visible), so all of them are alive. With it closed,
+ * none is mounted and none is driveable — reopening remounts and re-attaches,
+ * which is a fresh target, so keeping the old one alive would only preserve a
+ * handle nothing can use.
  */
-export function browserSurfaceIds(workspaces: readonly WorkspaceInfo[]): string[] {
+export function browserSurfaceIds(
+  workspaces: readonly WorkspaceInfo[],
+  panelOpen: boolean,
+): string[] {
   const out: string[] = [];
-  for (const ws of workspaces) collect(ws.splitTree, out);
+  for (const ws of workspaces) {
+    collect(ws.splitTree, out);
+    if (panelOpen) out.push(browserPanelSurfaceId(ws.id));
+  }
   return out;
 }
 
@@ -51,11 +78,14 @@ export function browserSurfaceIds(workspaces: readonly WorkspaceInfo[]): string[
  * Tell main the current truth. Safe to call as often as the layout changes —
  * the sweep is a set difference, and a list that matches is a no-op.
  */
-export function declareLiveBrowserSurfaces(workspaces: readonly WorkspaceInfo[]): void {
+export function declareLiveBrowserSurfaces(
+  workspaces: readonly WorkspaceInfo[],
+  panelOpen: boolean,
+): void {
   try {
     (globalThis as {
       window?: { wmux?: { cdp?: { surfacesAlive?: (ids: string[]) => void } } };
-    }).window?.wmux?.cdp?.surfacesAlive?.(browserSurfaceIds(workspaces));
+    }).window?.wmux?.cdp?.surfacesAlive?.(browserSurfaceIds(workspaces, panelOpen));
   } catch {
     /* preload/window unavailable (tests) — nothing to tell */
   }

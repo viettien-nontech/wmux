@@ -16,7 +16,7 @@ import CommandPalette from './components/CommandPalette/CommandPalette';
 import AgentNavigator from './components/AgentNavigator/AgentNavigator';
 import HubView from './components/Hub/hub-view';
 import { focusAgentTarget } from './store/focus-agent';
-import { declareLiveBrowserSurfaces } from './store/cdp-reconcile';
+import { declareLiveBrowserSurfaces, browserPanelSurfaceId } from './store/cdp-reconcile';
 import { useAgentDetection } from './hooks/useAgentDetection';
 import { useBlockedAlert } from './hooks/useBlockedAlert';
 import type { AgentRosterEntry } from './store/agent-rollup';
@@ -266,7 +266,7 @@ function handlePortsUpdate(cmd: any, updateWorkspaceMetadata: StoreAction): void
       // is arbitrary), and the guard permanently suppresses navigation thereafter.
       const newPort = firstNewDevPort(devPorts, ws?.ports || []);
       if (autoOpenDevPort && currentWs && newPort !== undefined) {
-        window.wmux?.browser?.navigate?.(`browser-${currentWs}`, `http://localhost:${newPort}`);
+        window.wmux?.browser?.navigate?.(browserPanelSurfaceId(currentWs), `http://localhost:${newPort}`);
       }
     }
     for (const ws of useStore.getState().workspaces) {
@@ -982,14 +982,18 @@ export default function App() {
    * panes disappear without any close action running. Measured moments after
    * launch: 5 targets against 2 real panes.
    *
-   * `workspaces` is the dependency because it IS the layout — every split,
-   * close, restore and workspace change mints a new array. The list is built
-   * here, inside the effect, and never captured for a later send: see the
-   * ordering note in `store/cdp-reconcile.ts`.
+   * `workspaces` is one dependency because it IS the layout — every split,
+   * close, restore and workspace change mints a new array. `browserOpen` is
+   * the other: the side panel below is a real BrowserPane per workspace,
+   * living OUTSIDE the split tree, so a list built from the tree alone
+   * reports every open panel as a ghost and kills the target of a browser
+   * the user is looking at. Measured on the rig, before this dependency
+   * existed. The list is built here, inside the effect, and never captured
+   * for a later send: see the ordering note in `store/cdp-reconcile.ts`.
    */
   useEffect(() => {
-    declareLiveBrowserSurfaces(workspaces);
-  }, [workspaces]);
+    declareLiveBrowserSurfaces(workspaces, browserOpen);
+  }, [workspaces, browserOpen]);
 
   // Auto-focus first pane whenever the active workspace changes or gains its first pane
   const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId) ?? null;
@@ -1642,7 +1646,7 @@ export default function App() {
               {/* Per-workspace browser — all stay mounted, only active visible */}
               {workspaces.map((ws) => (
                 <div
-                  key={`browser-${ws.id}`}
+                  key={browserPanelSurfaceId(ws.id)}
                   style={{
                     position: 'absolute',
                     inset: 0,
@@ -1650,7 +1654,7 @@ export default function App() {
                   }}
                 >
                   <BrowserPane
-                    surfaceId={`browser-${ws.id}`}
+                    surfaceId={browserPanelSurfaceId(ws.id)}
                     // `|| undefined`, not `??` (issue #212). A workspace that has
                     // never opened its browser is saved with `browserUrl: ''`,
                     // and `''` is a value — it satisfies `??` and defeats
