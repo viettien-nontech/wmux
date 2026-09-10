@@ -418,3 +418,66 @@ describe('TargetMultiplexer — enable is session state on a session everyone sh
     expect(a.domains.isGated(5, 'Runtime')).toBe(false);
   });
 });
+
+/*
+ * Frame ORDER, not just frame presence. puppeteer's target manager snapshots
+ * the discovered set the instant `setDiscoverTargets` resolves, so a reply
+ * that overtakes its own announcements leaves a real client connected to
+ * nothing at all — and a client that sees no panes reports no error, it just
+ * quietly does nothing. Only order catches that.
+ */
+describe('announcements land before the reply that caused them', () => {
+  const twoPanes = { 4: { title: 'A', url: 'http://a/' }, 5: { title: 'B', url: 'http://b/' } };
+  const posOfReply = (sent: any[], id: number) => sent.findIndex((m) => m.id === id);
+  const positionsOf = (sent: any[], method: string) =>
+    sent.map((m, i) => (m.method === method ? i : -1)).filter((i) => i >= 0);
+
+  it('Target.setDiscoverTargets announces every target first', async () => {
+    const h = harness(twoPanes);
+    await h.mux.handle({ id: 1, method: 'Target.setDiscoverTargets', params: { discover: true } });
+
+    const created = positionsOf(h.sent, 'Target.targetCreated');
+    expect(created).toHaveLength(2);
+    expect(Math.max(...created)).toBeLessThan(posOfReply(h.sent, 1));
+  });
+
+  it('Target.setAutoAttach attaches every target first', async () => {
+    const h = harness(twoPanes);
+    await h.mux.handle({ id: 2, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } });
+
+    const attached = positionsOf(h.sent, 'Target.attachedToTarget');
+    expect(attached).toHaveLength(2);
+    expect(Math.max(...attached)).toBeLessThan(posOfReply(h.sent, 2));
+  });
+
+  it('Target.attachToTarget announces the session before naming it in the reply', async () => {
+    const h = harness(twoPanes);
+    await h.mux.handle({ id: 3, method: 'Target.attachToTarget', params: { targetId: targetIdForWcId(4) } });
+
+    const attached = positionsOf(h.sent, 'Target.attachedToTarget');
+    expect(attached).toHaveLength(1);
+    expect(attached[0]).toBeLessThan(posOfReply(h.sent, 3));
+    // The event and the reply still have to agree on which session it is.
+    expect(framesOf(h.sent, 'Target.attachedToTarget')[0].params.sessionId)
+      .toBe(replyTo(h.sent, 3).result.sessionId);
+  });
+
+  it('Target.detachFromTarget announces the detach before the reply', async () => {
+    const h = harness(twoPanes);
+    const sessionId = await attach(h, targetIdForWcId(4));
+    h.sent.length = 0;
+    await h.mux.handle({ id: 4, method: 'Target.detachFromTarget', params: { sessionId } });
+
+    const detached = positionsOf(h.sent, 'Target.detachedFromTarget');
+    expect(detached).toHaveLength(1);
+    expect(detached[0]).toBeLessThan(posOfReply(h.sent, 4));
+  });
+
+  it('a client that never asked to discover is told nothing', async () => {
+    const h = harness(twoPanes);
+    await h.mux.handle({ id: 5, method: 'Target.setDiscoverTargets', params: { discover: false } });
+
+    expect(framesOf(h.sent, 'Target.targetCreated')).toHaveLength(0);
+    expect(posOfReply(h.sent, 5)).toBe(0);
+  });
+});

@@ -345,27 +345,38 @@ export class TargetMultiplexer {
         this.reply(id, undefined, { result: { targetInfos: this.allTargetInfos() } });
         return;
 
+      /*
+       * Chrome announces the targets BEFORE it answers the command, and
+       * puppeteer leans on that: its target manager snapshots the discovered
+       * set the moment `setDiscoverTargets` resolves and treats that snapshot
+       * as everything it must wait for. Answer first and the snapshot is
+       * empty, so `connect()` resolves against nothing and `browser.pages()`
+       * comes back empty with no error to show for it. Every announcement
+       * below therefore goes out ahead of its reply, the same way the removal
+       * path sends `detachedFromTarget` ahead of `targetDestroyed`.
+       */
       case 'Target.setDiscoverTargets': {
         this.discovering = params?.discover !== false;
-        this.reply(id, undefined, { result: {} });
         if (this.discovering) {
           for (const info of this.allTargetInfos()) {
             this.deps.send({ method: 'Target.targetCreated', params: { targetInfo: info } });
           }
         }
+        this.reply(id, undefined, { result: {} });
         return;
       }
 
       case 'Target.setAutoAttach': {
         this.autoAttach = params?.autoAttach === true;
-        this.reply(id, undefined, { result: {} });
-        if (!this.autoAttach) return;
-        for (const info of this.allTargetInfos()) {
-          const wcId = wcIdFromTargetId(info.targetId);
-          if (wcId === null) continue;
-          if ([...this.sessions.values()].includes(wcId)) continue;
-          this.emitAttached(this.openSession(wcId), info);
+        if (this.autoAttach) {
+          for (const info of this.allTargetInfos()) {
+            const wcId = wcIdFromTargetId(info.targetId);
+            if (wcId === null) continue;
+            if ([...this.sessions.values()].includes(wcId)) continue;
+            this.emitAttached(this.openSession(wcId), info);
+          }
         }
+        this.reply(id, undefined, { result: {} });
         return;
       }
 
@@ -379,8 +390,8 @@ export class TargetMultiplexer {
           return;
         }
         const newSessionId = this.openSession(wcId);
-        this.reply(id, undefined, { result: { sessionId: newSessionId } });
         this.emitAttached(newSessionId, info);
+        this.reply(id, undefined, { result: { sessionId: newSessionId } });
         return;
       }
 
@@ -393,11 +404,11 @@ export class TargetMultiplexer {
         }
         this.sessions.delete(target);
         await this.releaseSessionDomains(wcId, target);
-        this.reply(id, undefined, { result: {} });
         this.deps.send({
           method: 'Target.detachedFromTarget',
           params: { sessionId: target, targetId: targetIdForWcId(wcId) },
         });
+        this.reply(id, undefined, { result: {} });
         return;
       }
 
