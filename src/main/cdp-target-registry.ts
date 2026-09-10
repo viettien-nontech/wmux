@@ -115,6 +115,34 @@ export class TargetRegistry {
     return this.targetTheoWc.get(wcId) ?? null;
   }
 
+  /**
+   * Every surface that still owns a target — attached or not.
+   *
+   * This is the list the reconciliation compares against what the renderer
+   * says is really on screen. Deliberately keyed on the SURFACE: asking
+   * "which targets have no webContents" instead would collect every pane
+   * mid-remount, which is the bug `unbind` exists to avoid.
+   */
+  surfaceIds(): string[] {
+    return [...this.theoSurface.keys()];
+  }
+
+  /**
+   * One row per existing target: who it is, whose pane it is, and whether
+   * anything is showing it right now.
+   *
+   * `/json/list` cannot answer the last part — it enumerates attached targets
+   * only, so a target that is GONE and one that is merely DETACHED look
+   * identical through it. That blind spot cost most of a session: the monitor
+   * built to find this leak was reading the one endpoint that could not see it.
+   */
+  snapshot(): Array<{ targetId: string; surfaceId: string; wcId: number | null; attached: boolean }> {
+    return [...this.theoSurface.entries()].map(([surfaceId, targetId]) => {
+      const wcId = this.wcTheoTarget.get(targetId) ?? null;
+      return { targetId, surfaceId, wcId, attached: wcId !== null };
+    });
+  }
+
   /** Every target that still exists, attached or not. */
   liveTargetIds(): string[] {
     return [...this.wcTheoTarget.keys()];

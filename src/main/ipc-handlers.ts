@@ -844,6 +844,22 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
   ipcMain.on(IPC_CHANNELS.CDP_SURFACE_GONE, (_event, surfaceId: string) => {
     if (typeof surfaceId === 'string' && surfaceId) cdpProxyInstance?.surfaceGone(surfaceId);
   });
+  /**
+   * The renderer's statement of fact: these browser surfaces exist. Everything
+   * else the proxy still holds a target for is a ghost, and gets ended.
+   *
+   * The close event above cannot cover startup — the default workspace tree
+   * mounts and attaches, then the restored tree replaces it, and the panes that
+   * vanish never reach a close action. Measured: 5 targets, 2 real panes.
+   *
+   * The array must be a real list; an `undefined` from a garbled send would
+   * otherwise mean "nothing is alive" and destroy every target on the machine.
+   */
+  ipcMain.on(IPC_CHANNELS.CDP_SURFACES_ALIVE, (_event, surfaceIds: unknown) => {
+    if (!Array.isArray(surfaceIds)) return;
+    const sach = surfaceIds.filter((id): id is string => typeof id === 'string' && id !== '');
+    cdpProxyInstance?.reconcileSurfaces(sach);
+  });
 
   /**
    * Cheap enough to call on every entry into agent mode — `agentBrowserPath()`

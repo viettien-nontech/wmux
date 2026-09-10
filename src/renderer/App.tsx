@@ -16,6 +16,7 @@ import CommandPalette from './components/CommandPalette/CommandPalette';
 import AgentNavigator from './components/AgentNavigator/AgentNavigator';
 import HubView from './components/Hub/hub-view';
 import { focusAgentTarget } from './store/focus-agent';
+import { declareLiveBrowserSurfaces } from './store/cdp-reconcile';
 import { useAgentDetection } from './hooks/useAgentDetection';
 import { useBlockedAlert } from './hooks/useBlockedAlert';
 import type { AgentRosterEntry } from './store/agent-rollup';
@@ -971,6 +972,24 @@ export default function App() {
     });
     return unsub;
   }, []);
+
+  /*
+   * Tell main which browser surfaces actually exist, so a CDP target that lost
+   * its pane without passing through a close action is swept.
+   *
+   * Startup is the case that needs it: the default workspace tree mounts and
+   * its BrowserPanes attach, then the restored tree REPLACES it, and those
+   * panes disappear without any close action running. Measured moments after
+   * launch: 5 targets against 2 real panes.
+   *
+   * `workspaces` is the dependency because it IS the layout — every split,
+   * close, restore and workspace change mints a new array. The list is built
+   * here, inside the effect, and never captured for a later send: see the
+   * ordering note in `store/cdp-reconcile.ts`.
+   */
+  useEffect(() => {
+    declareLiveBrowserSurfaces(workspaces);
+  }, [workspaces]);
 
   // Auto-focus first pane whenever the active workspace changes or gains its first pane
   const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId) ?? null;

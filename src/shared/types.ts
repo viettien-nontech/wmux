@@ -665,6 +665,7 @@ export const IPC_CHANNELS = {
   CDP_DETACH: 'cdp:detach',
   /** A browser surface is really closed — the only thing that ends a CDP target. */
   CDP_SURFACE_GONE: 'cdp:surface-gone',
+  CDP_SURFACES_ALIVE: 'cdp:surfaces-alive',
   CDP_NAVIGATE: 'cdp:navigate',
   CDP_SNAPSHOT: 'cdp:snapshot',
   CDP_CLICK: 'cdp:click',

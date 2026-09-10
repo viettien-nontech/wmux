@@ -384,6 +384,12 @@ contextBridge.exposeInMainWorld('wmux', {
        re-render also produces; this one means the pane is closed. Only this
        may end a target — see `cdp-target-registry.ts`. */
     surfaceGone: (surfaceId: string) => ipcRenderer.send(IPC_CHANNELS.CDP_SURFACE_GONE, surfaceId),
+    /* The whole truth rather than one event: every browser surface that exists
+       right now. Main drops the targets of everything else. Startup replaces
+       the default tree with the restored one without closing anything, so the
+       events alone leave targets behind — see `cdp-reconcile.ts`. */
+    surfacesAlive: (surfaceIds: string[]) =>
+      ipcRenderer.send(IPC_CHANNELS.CDP_SURFACES_ALIVE, surfaceIds),
   },
   // Which engine backs a browser surface, and the setup flow for the one that
   // needs an external binary. Separate from `cdp` above: those verbs act on a

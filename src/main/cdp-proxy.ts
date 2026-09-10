@@ -177,6 +177,57 @@ export class CDPProxy {
     for (const client of this.browserClients) client.onTargetRemoved(wcId ?? -1, targetId);
   }
 
+  /**
+   * The renderer has declared every browser surface that really exists; end the
+   * targets of the ones that do not. Returns the target ids dropped.
+   *
+   * WHY THIS IS NEEDED AT ALL. Since a detach stopped ending targets, exactly
+   * one thing does: `surfaceGone`, fired from the store actions that close
+   * panes. Startup never reaches them. The default workspace tree mounts and
+   * its BrowserPanes attach, then the tree restored from the last session
+   * REPLACES the whole thing — those panes disappear without passing through
+   * any close path, so their targets stay forever. Measured twice, moments
+   * after launch: 3 targets / 0 real surfaces, then 5 / 2. They do eventually
+   * evaporate, when the last ghost webContents is collected minutes later, but
+   * "cleans itself up if you wait" is not the same as correct.
+   *
+   * WHY THE RENDERER DECIDES. Main cannot tell a closed pane from a remounting
+   * one — that is the whole lesson of `detachTarget`. The renderer holds the
+   * layout, so it holds the only honest answer, and this method trusts it and
+   * nothing else. Same shape as `reconcileOrphanSessions` in
+   * `agent-browser-runtime.ts`, and for the same reason: one crash, or one
+   * startup that skips the close path, must not leak forever.
+   *
+   * ⚠ Keyed on the SURFACE, never on attachment. A pane mid-remount has no
+   * webContents and is perfectly alive; sweeping "targets with no webContents"
+   * would re-break exactly what the detach change fixed.
+   */
+  reconcileSurfaces(liveSurfaceIds: readonly string[]): string[] {
+    const song = new Set(liveSurfaceIds);
+    const boDi: string[] = [];
+    for (const surfaceId of this.registry.surfaceIds()) {
+      if (song.has(surfaceId)) continue;
+      const targetId = this.registry.targetIdForSurface(surfaceId);
+      if (targetId) boDi.push(targetId);
+      // Goes through the ordinary close so clients hear `Target.targetDestroyed`
+      // — a ghost that vanishes silently leaves puppeteer holding a dead page.
+      this.surfaceGone(surfaceId);
+    }
+    return boDi;
+  }
+
+  /**
+   * Every target that exists, with whether anything is showing it.
+   *
+   * The measuring instrument for the leak above. `/json/list` lists ATTACHED
+   * targets only, so through it a destroyed target and a detached one are the
+   * same event — the monitor written to catch this leak was blind in precisely
+   * the place it had to see.
+   */
+  snapshot(): Array<{ targetId: string; surfaceId: string; wcId: number | null; attached: boolean }> {
+    return this.registry.snapshot();
+  }
+
   /** Identity, for the multiplexer and for `/json/list`. */
   targetIdFor(wcId: number): string | null { return this.registry.targetIdFor(wcId); }
   wcIdForTargetId(targetId: unknown): number | null { return this.registry.wcIdFor(targetId); }
@@ -271,6 +322,20 @@ export class CDPProxy {
           }];
         });
         res.end(JSON.stringify(pages));
+        return;
+      }
+
+      /*
+       * wmux's own diagnostic — NOT part of the CDP contract.
+       *
+       * Deliberately separate from `/json/list`, which must keep answering
+       * exactly what Chrome answers. This one reports every target that exists
+       * including the detached ones, which is the only way from outside the app
+       * to tell a target that is GONE from one whose pane is mid-remount. That
+       * distinction is what the ghost-target investigation could not measure.
+       */
+      if (req.url === '/wmux/cdp-state') {
+        res.end(JSON.stringify({ port: this.port, targets: this.snapshot() }));
         return;
       }
 

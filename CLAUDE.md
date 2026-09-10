@@ -176,7 +176,14 @@ hook:     onEvent
 claudeActivity: onUpdate
 agentState: onUpdate   # declared blocked/working/idle (issue #128)
 session:  save, load, list, delete
-cdp:      attach, detach
+cdp:      attach, detach, surfacesAlive   # attach/detach are one pane's React
+                                     # lifecycle; surfacesAlive is the WHOLE
+                                     # truth, and main ends the target of every
+                                     # browser surface not in it. Startup needs
+                                     # it: the default tree mounts and attaches,
+                                     # then the restored tree replaces it without
+                                     # any close action running, so those targets
+                                     # outlive their panes (5 targets, 2 panes)
 explorer: listDir, reveal, openInApp,  # a surfaceId and a RELATIVE path,
           diffStats, readMarkdown      # never an absolute one — main derives
 code:     readFile, writeFile          # the root itself, or it is not a jail.
@@ -675,7 +682,7 @@ Config:  config:getTheme/getThemeList/importWindowsTerminal/importGhostty
 System:  system:getShells/openExternal
 Notify:  notification:fire/list/clear/jump
 Agent:   agent:spawn/spawn-batch/status/list/kill/update
-CDP:     cdp:attach/detach
+CDP:     cdp:attach/detach, cdp:surface-gone, cdp:surfaces-alive
 AgentBr: agent-browser:enable/disable/status/install/current-url/open   # engine control
 Session: session:save-named/load-named/list-named/delete-named
 Meta:    metadata:update, hook:event, claude:activity, agent:state
