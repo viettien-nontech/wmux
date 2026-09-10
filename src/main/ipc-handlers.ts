@@ -811,19 +811,38 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
       // ADDS a target rather than replacing the proxy's only one. The old
       // `setWebContentsId` meant the newest pane silently stole 9222 from
       // whoever was already driving through it.
-      cdpProxyInstance?.addTarget(webContentsId);
+      //
+      // The surface id is what makes the target's IDENTITY survive a remount:
+      // a webContents does not. See `cdp-target-registry.ts`.
+      cdpProxyInstance?.addTarget(webContentsId, surfaceId ?? null);
     },
   );
   ipcMain.on(IPC_CHANNELS.CDP_DETACH, (_event, webContentsId?: number) => {
     // Detach only this pane's own target — other open browsers keep their
     // independent connections (issues #27, #62).
     cdpBridge.detach(webContentsId);
-    // Same rule on the proxy. This used to null the single pointer whenever the
-    // closing pane happened to be the one it held, which took the CDP endpoint
-    // away from clients driving panes that were still open — closing one
-    // session's browser blanked the other session's.
+    /*
+     * On the proxy this DETACHES and no longer destroys.
+     *
+     * This channel is a React unmount, and an unmount is not a close: closing
+     * one browser pane re-renders the split tree, so every BrowserPane unmounts
+     * and lands here. Destroying on it took every OTHER pane's target down too
+     * — measured on the running app, closing one of three panes left the right
+     * COUNT and not one surviving target id, so a client driving a pane nobody
+     * touched lost every handle it held. `CDP_SURFACE_GONE` is the close.
+     */
     const closing = webContentsId ?? cdpProxyInstance?.currentWebContentsId ?? undefined;
-    if (closing !== undefined) cdpProxyInstance?.removeTarget(closing);
+    if (closing !== undefined) cdpProxyInstance?.detachTarget(closing);
+  });
+  /**
+   * A browser surface is really gone — the ONLY thing that ends a CDP target.
+   *
+   * Sent from the store actions that actually close things, not from a React
+   * lifecycle: only the store can tell "this pane is closed" from "this pane
+   * re-rendered", and telling them apart is the whole point.
+   */
+  ipcMain.on(IPC_CHANNELS.CDP_SURFACE_GONE, (_event, surfaceId: string) => {
+    if (typeof surfaceId === 'string' && surfaceId) cdpProxyInstance?.surfaceGone(surfaceId);
   });
 
   /**

@@ -380,6 +380,10 @@ contextBridge.exposeInMainWorld('wmux', {
     attach: (webContentsId: number, surfaceId?: string | null, workspaceId?: string | null) =>
       ipcRenderer.send(IPC_CHANNELS.CDP_ATTACH, webContentsId, surfaceId, workspaceId),
     detach: (webContentsId?: number) => ipcRenderer.send(IPC_CHANNELS.CDP_DETACH, webContentsId),
+    /* Not the same event as `detach`. Detach is a React unmount, which a
+       re-render also produces; this one means the pane is closed. Only this
+       may end a target — see `cdp-target-registry.ts`. */
+    surfaceGone: (surfaceId: string) => ipcRenderer.send(IPC_CHANNELS.CDP_SURFACE_GONE, surfaceId),
   },
   // Which engine backs a browser surface, and the setup flow for the one that
   // needs an external binary. Separate from `cdp` above: those verbs act on a

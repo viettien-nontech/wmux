@@ -5,9 +5,8 @@ import { webContents } from 'electron';
 import {
   TargetMultiplexer,
   parseDebuggerPath,
-  targetIdForWcId,
-  wcIdFromTargetId,
 } from './cdp-target-multiplexer';
+import { TargetRegistry } from './cdp-target-registry';
 import { SharedDomains } from './cdp-shared-domains';
 
 const DEFAULT_PORT = 9222;
@@ -61,8 +60,20 @@ export function isAllowedCdpOrigin(origin: string | undefined): boolean {
 
 /** A connected browser-level client, as the proxy needs to notify it. */
 interface BrowserClient {
+  /** A surface appeared for the FIRST time: announce a new target. */
   onTargetAdded(wcId: number): void;
-  onTargetRemoved(wcId: number): void;
+  /** A surface is really gone: announce its target's death. */
+  onTargetRemoved(wcId: number, targetId: string): void;
+  /**
+   * Same surface, new webContents. SILENT on purpose.
+   *
+   * A React remount produces detach-then-attach within milliseconds, and
+   * announcing it made every client watching an untouched pane see its target
+   * destroyed and replaced. Listeners move; nothing is said.
+   */
+  onTargetRebound(wcId: number): void;
+  /** Its webContents went away, but the surface has not. Also silent. */
+  onTargetUnbound(wcId: number): void;
 }
 
 export class CDPProxy {
@@ -104,18 +115,60 @@ export class CDPProxy {
    */
   private domains = new SharedDomains();
 
-  /** A browser pane attached. */
-  addTarget(wcId: number): void {
-    if (this.targets.has(wcId)) return;
+  /**
+   * Who each browser pane IS, independently of which webContents shows it.
+   *
+   * See `cdp-target-registry.ts` for the measurement this came out of: closing
+   * ONE browser pane used to change the target id of every OTHER one, because
+   * identity was the webContents id and a React remount mints a new one.
+   */
+  private registry = new TargetRegistry();
+
+  /**
+   * A browser pane attached, or re-attached after a remount.
+   *
+   * The FIRST attach for a surface announces a target. Every later one is a
+   * rebind: same identity, new webContents, and clients are told nothing.
+   */
+  addTarget(wcId: number, surfaceId?: string | null): void {
+    /* No surface id means a caller that predates identity-by-surface. Fall back
+       to the webContents id so such a pane still gets a stable-enough handle
+       rather than none at all. */
+    const surface = surfaceId || `wc-${wcId}`;
+    const laMoi = this.registry.targetIdForSurface(surface) === null;
+    this.registry.bind(surface, wcId);
     this.targets.add(wcId);
-    for (const client of this.browserClients) client.onTargetAdded(wcId);
+    for (const client of this.browserClients) {
+      if (laMoi) client.onTargetAdded(wcId);
+      else client.onTargetRebound(wcId);
+    }
   }
 
-  /** A browser pane went away. Everyone else keeps theirs. */
-  removeTarget(wcId: number): void {
+  /**
+   * This webContents is going away — the pane may or may not be.
+   *
+   * A React unmount cannot tell the two apart, so this NEVER ends a target.
+   * Only `surfaceGone` does.
+   */
+  detachTarget(wcId: number): void {
     if (!this.targets.delete(wcId)) return;
-    for (const client of this.browserClients) client.onTargetRemoved(wcId);
+    this.registry.unbind(wcId);
+    for (const client of this.browserClients) client.onTargetUnbound(wcId);
   }
+
+  /** A browser pane is really closed. The only thing that kills a target. */
+  surfaceGone(surfaceId: string): void {
+    const targetId = this.registry.targetIdForSurface(surfaceId);
+    if (!targetId) return;
+    const wcId = this.registry.wcIdFor(targetId);
+    this.registry.surfaceGone(surfaceId);
+    if (typeof wcId === 'number') this.targets.delete(wcId);
+    for (const client of this.browserClients) client.onTargetRemoved(wcId ?? -1, targetId);
+  }
+
+  /** Identity, for the multiplexer and for `/json/list`. */
+  targetIdFor(wcId: number): string | null { return this.registry.targetIdFor(wcId); }
+  wcIdForTargetId(targetId: unknown): number | null { return this.registry.wcIdFor(targetId); }
 
   /**
    * The pane a target-less client gets.
@@ -194,15 +247,16 @@ export class CDPProxy {
         // invisible to anything that read this endpoint.
         const pages = [...this.targets].flatMap((wcId) => {
           const info = this.infoFor(wcId);
-          if (!info) return [];
+          const targetId = this.registry.targetIdFor(wcId);
+          if (!info || !targetId) return [];
           return [{
             description: '',
             devtoolsFrontendUrl: '',
-            id: targetIdForWcId(wcId),
+            id: targetId,
             type: 'page',
             title: info.title,
             url: info.url,
-            webSocketDebuggerUrl: `ws://localhost:${this.port}/devtools/page/${targetIdForWcId(wcId)}`,
+            webSocketDebuggerUrl: `ws://localhost:${this.port}/devtools/page/${targetId}`,
           }];
         });
         res.end(JSON.stringify(pages));
@@ -243,7 +297,7 @@ export class CDPProxy {
         return;
       }
 
-      const requested = route?.kind === 'page' ? wcIdFromTargetId(route.targetId) : null;
+      const requested = route?.kind === 'page' ? this.registry.wcIdFor(route.targetId) : null;
       // An id naming no live pane falls back to the most recent one, which is
       // what a raw client holding a stale `/json/list` URL used to get.
       const wcId = requested !== null && this.targets.has(requested) ? requested : this.currentWebContentsId;
@@ -333,6 +387,8 @@ export class CDPProxy {
       },
       sendCommand: (wcId, method, params) => this.sendCommandTo(wcId, method, params),
       version: () => this.browserVersion(),
+      targetIdFor: (wcId) => this.registry.targetIdFor(wcId),
+      wcIdForTargetId: (targetId) => this.registry.wcIdFor(targetId),
       domains: this.domains,
     });
 
@@ -361,7 +417,10 @@ export class CDPProxy {
       onTargetAdded: (wcId) => { listen(wcId); mux.onTargetAdded(wcId); },
       // Order matters: the multiplexer still needs the target to describe it in
       // the detach/destroy frames, so stop listening only afterwards.
-      onTargetRemoved: (wcId) => { mux.onTargetRemoved(wcId); unlisten(wcId); },
+      onTargetRemoved: (wcId, targetId) => { mux.onTargetRemoved(wcId, targetId); unlisten(wcId); },
+      // Silent halves of a remount: move the debugger listener, say nothing.
+      onTargetRebound: (wcId) => { listen(wcId); },
+      onTargetUnbound: (wcId) => { unlisten(wcId); },
     };
     this.browserClients.add(client);
 
@@ -419,7 +478,7 @@ export class CDPProxy {
     ws.on('close', cleanup);
     ws.on('error', cleanup);
 
-    console.log(`[wmux] CDP proxy: page client connected (${targetIdForWcId(wcId)})`);
+    console.log(`[wmux] CDP proxy: page client connected (${this.registry.targetIdFor(wcId) ?? wcId})`);
   }
 
   stop(): void {

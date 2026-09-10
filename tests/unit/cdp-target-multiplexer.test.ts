@@ -2,11 +2,10 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   TargetMultiplexer,
   parseDebuggerPath,
-  targetIdForWcId,
-  wcIdFromTargetId,
   type MultiplexerDeps,
 } from '../../src/main/cdp-target-multiplexer';
 import { SharedDomains } from '../../src/main/cdp-shared-domains';
+import { TargetRegistry } from '../../src/main/cdp-target-registry';
 
 /**
  * A client connection, faked. `sent` is every frame the multiplexer pushed at
@@ -15,12 +14,23 @@ import { SharedDomains } from '../../src/main/cdp-shared-domains';
 function harness(
   panes: Record<number, { title: string; url: string }>,
   domains: SharedDomains = new SharedDomains(),
+  registry: TargetRegistry = new TargetRegistry(),
 ) {
   const sent: any[] = [];
   const commands: { wcId: number; method: string; params: unknown }[] = [];
+  /* Identity is no longer computed from the webContents id — a webContents does
+     not survive a remount, which is what made closing one pane rename every
+     other one's target. The real registry is used here rather than a stub, so
+     these tests break if the two ever disagree about what an id is. */
+  /* Bind on demand, the way `CdpProxy.addTarget` does when a pane attaches —
+     a test that adds a pane mid-run must get an identity for it too. */
+  const idOf = (wcId: number) => registry.targetIdFor(wcId) ?? registry.bind(`surf-${wcId}`, wcId);
+  for (const wcId of Object.keys(panes).map(Number)) idOf(wcId);
   const deps: MultiplexerDeps = {
     listTargets: () => Object.keys(panes).map(Number),
     infoFor: (wcId) => panes[wcId] ?? null,
+    targetIdFor: (wcId) => idOf(wcId),
+    wcIdForTargetId: (targetId) => registry.wcIdFor(targetId),
     send: (m) => { sent.push(m); },
     sendCommand: async (wcId, method, params) => { commands.push({ wcId, method, params }); return { ok: wcId }; },
     version: () => ({
@@ -28,12 +38,14 @@ function harness(
     }),
     domains,
   };
-  return { mux: new TargetMultiplexer(deps), sent, commands, panes, domains };
+  return { mux: new TargetMultiplexer(deps), sent, commands, panes, domains, registry, idOf };
 }
 
 /** A SECOND client on the same panes, sharing the one real debugger session. */
 function secondClient(first: ReturnType<typeof harness>) {
-  return harness(first.panes, first.domains);
+  /* The SAME registry, not a copy. Identity is a fact about the app, not about
+     a connection: two clients looking at one pane must see one target id. */
+  return harness(first.panes, first.domains, first.registry);
 }
 
 /** Attach a client to one pane and hand back its session id. */
@@ -68,59 +80,43 @@ describe('parseDebuggerPath', () => {
   });
 });
 
-describe('wcIdFromTargetId', () => {
-  it('round-trips a real id', () => {
-    expect(wcIdFromTargetId(targetIdForWcId(42))).toBe(42);
-  });
-
-  it('rejects junk rather than coercing it', () => {
-    // Number('') is 0 and Number('12abc') is NaN; both would otherwise reach
-    // webContents.fromId as a "webContents id".
-    expect(wcIdFromTargetId('wmux-page-')).toBeNull();
-    expect(wcIdFromTargetId('wmux-page-12abc')).toBeNull();
-    expect(wcIdFromTargetId('page-12')).toBeNull();
-    expect(wcIdFromTargetId(12 as unknown)).toBeNull();
-    expect(wcIdFromTargetId(undefined)).toBeNull();
-  });
-});
-
 describe('TargetMultiplexer — the browser-domain handshake puppeteer performs', () => {
   it('answers Target.getBrowserContexts instead of forwarding it to a page', async () => {
     // The exact frame that used to come back "Not allowed": the proxy pushed it
     // into a PAGE debugger, which has no browser domain.
-    const { mux, sent } = harness({ 5: { title: 'a', url: 'http://a' } });
+    const { mux, sent, idOf } = harness({ 5: { title: 'a', url: 'http://a' } });
     await mux.handle({ id: 1, method: 'Target.getBrowserContexts' });
     expect(replyTo(sent, 1)).toEqual({ id: 1, result: { browserContextIds: [] } });
   });
 
   it('lists every browser pane as its own page target', async () => {
-    const { mux, sent } = harness({
+    const { mux, sent, idOf } = harness({
       5: { title: 'one', url: 'http://one' },
       9: { title: 'two', url: 'http://two' },
     });
     await mux.handle({ id: 1, method: 'Target.getTargets' });
     const infos = replyTo(sent, 1).result.targetInfos;
     expect(infos).toHaveLength(2);
-    expect(infos.map((t: any) => t.targetId)).toEqual(['wmux-page-5', 'wmux-page-9']);
+    expect(infos.map((t: any) => t.targetId)).toEqual([idOf(5), idOf(9)]);
     expect(infos.map((t: any) => t.url)).toEqual(['http://one', 'http://two']);
     expect(infos.every((t: any) => t.type === 'page')).toBe(true);
   });
 
   it('skips a pane whose webContents has already gone', async () => {
-    const { mux, sent, panes } = harness({ 5: { title: 'one', url: 'http://one' }, 9: { title: 't', url: 'u' } });
+    const { mux, sent, panes, idOf } = harness({ 5: { title: 'one', url: 'http://one' }, 9: { title: 't', url: 'u' } });
     delete (panes as any)[9];
     await mux.handle({ id: 1, method: 'Target.getTargets' });
     expect(replyTo(sent, 1).result.targetInfos).toHaveLength(1);
   });
 
   it('emits one targetCreated per pane once discovery is on', async () => {
-    const { mux, sent } = harness({ 5: { title: 'one', url: 'u1' }, 9: { title: 'two', url: 'u2' } });
+    const { mux, sent, idOf } = harness({ 5: { title: 'one', url: 'u1' }, 9: { title: 'two', url: 'u2' } });
     await mux.handle({ id: 1, method: 'Target.setDiscoverTargets', params: { discover: true } });
     expect(framesOf(sent, 'Target.targetCreated')).toHaveLength(2);
   });
 
   it('auto-attaches every pane, one distinct session each', async () => {
-    const { mux, sent } = harness({ 5: { title: 'one', url: 'u1' }, 9: { title: 'two', url: 'u2' } });
+    const { mux, sent, idOf } = harness({ 5: { title: 'one', url: 'u1' }, 9: { title: 'two', url: 'u2' } });
     await mux.handle({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true, flatten: true } });
     const attached = framesOf(sent, 'Target.attachedToTarget');
     expect(attached).toHaveLength(2);
@@ -130,24 +126,24 @@ describe('TargetMultiplexer — the browser-domain handshake puppeteer performs'
   });
 
   it('does not re-attach a pane it already holds a session for', async () => {
-    const { mux, sent } = harness({ 5: { title: 'one', url: 'u1' } });
-    await mux.handle({ id: 1, method: 'Target.attachToTarget', params: { targetId: 'wmux-page-5', flatten: true } });
+    const { mux, sent, idOf } = harness({ 5: { title: 'one', url: 'u1' } });
+    await mux.handle({ id: 1, method: 'Target.attachToTarget', params: { targetId: idOf(5), flatten: true } });
     await mux.handle({ id: 2, method: 'Target.setAutoAttach', params: { autoAttach: true } });
     expect(framesOf(sent, 'Target.attachedToTarget')).toHaveLength(1);
     expect(mux.openSessions.size).toBe(1);
   });
 
   it('refuses an attach to a target id it does not own', async () => {
-    const { mux, sent } = harness({ 5: { title: 'one', url: 'u1' } });
-    await mux.handle({ id: 1, method: 'Target.attachToTarget', params: { targetId: 'wmux-page-999' } });
+    const { mux, sent, idOf } = harness({ 5: { title: 'one', url: 'u1' } });
+    await mux.handle({ id: 1, method: 'Target.attachToTarget', params: { targetId: 'wmux-page-khong-ai-so-huu' } });
     expect(replyTo(sent, 1).error.code).toBe(-32602);
   });
 });
 
 describe('TargetMultiplexer — routing commands and events by session', () => {
   it('sends a session-tagged command to that session own pane, and tags the reply', async () => {
-    const { mux, sent, commands } = harness({ 5: { title: 'one', url: 'u1' }, 9: { title: 'two', url: 'u2' } });
-    await mux.handle({ id: 1, method: 'Target.attachToTarget', params: { targetId: 'wmux-page-9' } });
+    const { mux, sent, commands, idOf } = harness({ 5: { title: 'one', url: 'u1' }, 9: { title: 'two', url: 'u2' } });
+    await mux.handle({ id: 1, method: 'Target.attachToTarget', params: { targetId: idOf(9) } });
     const sessionId = replyTo(sent, 1).result.sessionId;
 
     // A one-shot command, deliberately: `Runtime.enable` used to stand in here,
@@ -160,9 +156,9 @@ describe('TargetMultiplexer — routing commands and events by session', () => {
   });
 
   it('fans a page event out only to the sessions bound to that pane', async () => {
-    const { mux, sent } = harness({ 5: { title: 'one', url: 'u1' }, 9: { title: 'two', url: 'u2' } });
-    await mux.handle({ id: 1, method: 'Target.attachToTarget', params: { targetId: 'wmux-page-5' } });
-    await mux.handle({ id: 2, method: 'Target.attachToTarget', params: { targetId: 'wmux-page-9' } });
+    const { mux, sent, idOf } = harness({ 5: { title: 'one', url: 'u1' }, 9: { title: 'two', url: 'u2' } });
+    await mux.handle({ id: 1, method: 'Target.attachToTarget', params: { targetId: idOf(5) } });
+    await mux.handle({ id: 2, method: 'Target.attachToTarget', params: { targetId: idOf(9) } });
     const sessionFive = replyTo(sent, 1).result.sessionId;
 
     mux.onPageEvent(5, 'Page.loadEventFired', { t: 1 });
@@ -173,7 +169,7 @@ describe('TargetMultiplexer — routing commands and events by session', () => {
   });
 
   it('answers an unknown sessionId rather than dropping the frame', async () => {
-    const { mux, sent } = harness({ 5: { title: 'one', url: 'u1' } });
+    const { mux, sent, idOf } = harness({ 5: { title: 'one', url: 'u1' } });
     await mux.handle({ id: 7, sessionId: 'nope', method: 'Runtime.evaluate' });
     expect(replyTo(sent, 7).error.message).toContain('nope');
   });
@@ -181,7 +177,7 @@ describe('TargetMultiplexer — routing commands and events by session', () => {
   it('turns a page-level command sent with no session into an error, never a guess', async () => {
     // Guessing which pane a sessionless Runtime.evaluate meant is the exact
     // cross-talk this module exists to remove.
-    const { mux, sent, commands } = harness({ 5: { title: 'one', url: 'u1' }, 9: { title: 'two', url: 'u2' } });
+    const { mux, sent, commands, idOf } = harness({ 5: { title: 'one', url: 'u1' }, 9: { title: 'two', url: 'u2' } });
     await mux.handle({ id: 3, method: 'Runtime.evaluate', params: { expression: '1' } });
     expect(commands).toHaveLength(0);
     expect(replyTo(sent, 3).error.code).toBe(-32601);
@@ -189,8 +185,8 @@ describe('TargetMultiplexer — routing commands and events by session', () => {
   });
 
   it('surfaces a page command failure as a CDP error on the same session', async () => {
-    const { mux, sent } = harness({ 5: { title: 'one', url: 'u1' } });
-    await mux.handle({ id: 1, method: 'Target.attachToTarget', params: { targetId: 'wmux-page-5' } });
+    const { mux, sent, idOf } = harness({ 5: { title: 'one', url: 'u1' } });
+    await mux.handle({ id: 1, method: 'Target.attachToTarget', params: { targetId: idOf(5) } });
     const sessionId = replyTo(sent, 1).result.sessionId;
     (mux as any).deps.sendCommand = async () => { throw new Error('Browser not attached'); };
     await mux.handle({ id: 2, sessionId, method: 'Runtime.enable' });
@@ -202,7 +198,7 @@ describe('TargetMultiplexer — routing commands and events by session', () => {
 
 describe('TargetMultiplexer — closing one pane leaves the others alone (the bug)', () => {
   it('detaches only the closed pane sessions, then destroys only its target', async () => {
-    const { mux, sent } = harness({ 5: { title: 'one', url: 'u1' }, 9: { title: 'two', url: 'u2' } });
+    const { mux, sent, idOf } = harness({ 5: { title: 'one', url: 'u1' }, 9: { title: 'two', url: 'u2' } });
     await mux.handle({ id: 1, method: 'Target.setDiscoverTargets', params: { discover: true } });
     await mux.handle({ id: 2, method: 'Target.setAutoAttach', params: { autoAttach: true } });
     const sessionFor = (wcId: number) =>
@@ -210,23 +206,23 @@ describe('TargetMultiplexer — closing one pane leaves the others alone (the bu
     const sessionNine = sessionFor(9);
     sent.length = 0;
 
-    mux.onTargetRemoved(5);
+    mux.onTargetRemoved(5, idOf(5));
 
     const detached = framesOf(sent, 'Target.detachedFromTarget');
     expect(detached).toHaveLength(1);
-    expect(detached[0].params.targetId).toBe('wmux-page-5');
-    expect(framesOf(sent, 'Target.targetDestroyed').map((f) => f.params.targetId)).toEqual(['wmux-page-5']);
+    expect(detached[0].params.targetId).toBe(idOf(5));
+    expect(framesOf(sent, 'Target.targetDestroyed').map((f) => f.params.targetId)).toEqual([idOf(5)]);
     // The surviving pane keeps the session it had.
     expect(sessionFor(9)).toBe(sessionNine);
     expect(mux.openSessions.size).toBe(1);
   });
 
   it('keeps driving the surviving pane after the other one closed', async () => {
-    const { mux, sent, commands } = harness({ 5: { title: 'one', url: 'u1' }, 9: { title: 'two', url: 'u2' } });
+    const { mux, sent, commands, idOf } = harness({ 5: { title: 'one', url: 'u1' }, 9: { title: 'two', url: 'u2' } });
     await mux.handle({ id: 1, method: 'Target.setAutoAttach', params: { autoAttach: true } });
     const sessionNine = [...mux.openSessions].find(([, id]) => id === 9)![0];
 
-    mux.onTargetRemoved(5);
+    mux.onTargetRemoved(5, idOf(5));
     await mux.handle({ id: 2, sessionId: sessionNine, method: 'Page.reload' });
 
     expect(commands).toEqual([{ wcId: 9, method: 'Page.reload', params: {} }]);
@@ -256,34 +252,34 @@ describe('TargetMultiplexer — closing one pane leaves the others alone (the bu
   });
 
   it('announces a newly opened pane to a discovering client', async () => {
-    const { mux, sent, panes } = harness({ 5: { title: 'one', url: 'u1' } });
+    const { mux, sent, panes, idOf } = harness({ 5: { title: 'one', url: 'u1' } });
     await mux.handle({ id: 1, method: 'Target.setDiscoverTargets', params: { discover: true } });
     sent.length = 0;
     (panes as any)[9] = { title: 'two', url: 'u2' };
 
     mux.onTargetAdded(9);
 
-    expect(framesOf(sent, 'Target.targetCreated')[0].params.targetInfo.targetId).toBe('wmux-page-9');
+    expect(framesOf(sent, 'Target.targetCreated')[0].params.targetInfo.targetId).toBe(idOf(9));
   });
 });
 
 describe('TargetMultiplexer — what it refuses', () => {
   it('will not let a remote client close a pane or the app', async () => {
-    const { mux, sent } = harness({ 5: { title: 'one', url: 'u1' } });
+    const { mux, sent, idOf } = harness({ 5: { title: 'one', url: 'u1' } });
     await mux.handle({ id: 1, method: 'Browser.close' });
-    await mux.handle({ id: 2, method: 'Target.closeTarget', params: { targetId: 'wmux-page-5' } });
+    await mux.handle({ id: 2, method: 'Target.closeTarget', params: { targetId: idOf(5) } });
     await mux.handle({ id: 3, method: 'Target.createTarget', params: { url: 'http://x' } });
     for (const id of [1, 2, 3]) expect(replyTo(sent, id).error.code).toBe(-32601);
   });
 
   it('says nothing back to a notification (a frame with no id)', async () => {
-    const { mux, sent } = harness({ 5: { title: 'one', url: 'u1' } });
+    const { mux, sent, idOf } = harness({ 5: { title: 'one', url: 'u1' } });
     await mux.handle({ method: 'Target.getTargets' });
     expect(sent.filter((m) => m.id !== undefined)).toHaveLength(0);
   });
 
   it('ignores a frame that is not a command', async () => {
-    const { mux, sent } = harness({ 5: { title: 'one', url: 'u1' } });
+    const { mux, sent, idOf } = harness({ 5: { title: 'one', url: 'u1' } });
     await mux.handle({ id: 1 });
     await mux.handle(null);
     expect(sent).toHaveLength(0);
@@ -302,7 +298,7 @@ describe('TargetMultiplexer — what it refuses', () => {
 describe('TargetMultiplexer — enable is session state on a session everyone shares', () => {
   it('really enables the domain for the first session that asks', async () => {
     const h = harness({ 5: { title: 'a', url: 'http://a' } });
-    const sess = await attach(h, 'wmux-page-5');
+    const sess = await attach(h, h.idOf(5));
     h.commands.length = 0;
     await h.mux.handle({ id: 1, method: 'Runtime.enable', sessionId: sess });
     // A disable first: a raw page socket, or a client from before this fix,
@@ -313,7 +309,7 @@ describe('TargetMultiplexer — enable is session state on a session everyone sh
 
   it('does NOT re-enable for a second client, and catches that client up instead', async () => {
     const a = harness({ 5: { title: 'a', url: 'http://a' } });
-    const sessA = await attach(a, 'wmux-page-5');
+    const sessA = await attach(a, a.idOf(5));
     await a.mux.handle({ id: 1, method: 'Runtime.enable', sessionId: sessA });
     // The pane announces its worlds; every connection's listener sees them.
     const ctx = (id: number, name: string) => ({ context: { id, name, origin: 'http://a', uniqueId: 'u' + id } });
@@ -321,7 +317,7 @@ describe('TargetMultiplexer — enable is session state on a session everyone sh
     a.mux.onPageEvent(5, 'Runtime.executionContextCreated', ctx(2, 'util'));
 
     const b = secondClient(a);
-    const sessB = await attach(b, 'wmux-page-5');
+    const sessB = await attach(b, b.idOf(5));
     b.commands.length = 0;
     b.sent.length = 0;
     await b.mux.handle({ id: 7, method: 'Runtime.enable', sessionId: sessB });
@@ -338,10 +334,10 @@ describe('TargetMultiplexer — enable is session state on a session everyone sh
 
   it('keeps the domain on when one of two holders disables it', async () => {
     const a = harness({ 5: { title: 'a', url: 'http://a' } });
-    const sessA = await attach(a, 'wmux-page-5');
+    const sessA = await attach(a, a.idOf(5));
     await a.mux.handle({ id: 1, method: 'Network.enable', sessionId: sessA });
     const b = secondClient(a);
-    const sessB = await attach(b, 'wmux-page-5');
+    const sessB = await attach(b, b.idOf(5));
     await b.mux.handle({ id: 2, method: 'Network.enable', sessionId: sessB });
 
     a.commands.length = 0;
@@ -354,7 +350,7 @@ describe('TargetMultiplexer — enable is session state on a session everyone sh
 
   it('forwards the disable once the last holder lets go', async () => {
     const a = harness({ 5: { title: 'a', url: 'http://a' } });
-    const sessA = await attach(a, 'wmux-page-5');
+    const sessA = await attach(a, a.idOf(5));
     await a.mux.handle({ id: 1, method: 'Network.enable', sessionId: sessA });
     a.commands.length = 0;
     await a.mux.handle({ id: 2, method: 'Network.disable', sessionId: sessA });
@@ -363,9 +359,9 @@ describe('TargetMultiplexer — enable is session state on a session everyone sh
 
   it('stops sending a domain’s events to the session that turned it off', async () => {
     const a = harness({ 5: { title: 'a', url: 'http://a' } });
-    const sessA = await attach(a, 'wmux-page-5');
+    const sessA = await attach(a, a.idOf(5));
     const b = secondClient(a);
-    const sessB = await attach(b, 'wmux-page-5');
+    const sessB = await attach(b, b.idOf(5));
     await a.mux.handle({ id: 1, method: 'Network.enable', sessionId: sessA });
     await b.mux.handle({ id: 2, method: 'Network.enable', sessionId: sessB });
     await a.mux.handle({ id: 3, method: 'Network.disable', sessionId: sessA });
@@ -381,7 +377,7 @@ describe('TargetMultiplexer — enable is session state on a session everyone sh
 
   it('never withholds an event from a domain nobody gates', async () => {
     const a = harness({ 5: { title: 'a', url: 'http://a' } });
-    await attach(a, 'wmux-page-5');
+    await attach(a, a.idOf(5));
     a.sent.length = 0;
     a.mux.onPageEvent(5, 'Inspector.targetCrashed', {});
     expect(framesOf(a.sent, 'Inspector.targetCrashed')).toHaveLength(1);
@@ -389,7 +385,7 @@ describe('TargetMultiplexer — enable is session state on a session everyone sh
 
   it('lets go of the domains a detached session held', async () => {
     const a = harness({ 5: { title: 'a', url: 'http://a' } });
-    const sessA = await attach(a, 'wmux-page-5');
+    const sessA = await attach(a, a.idOf(5));
     await a.mux.handle({ id: 1, method: 'Runtime.enable', sessionId: sessA });
     a.commands.length = 0;
     await a.mux.handle({ id: 2, method: 'Target.detachFromTarget', params: { sessionId: sessA } });
@@ -398,7 +394,7 @@ describe('TargetMultiplexer — enable is session state on a session everyone sh
 
   it('lets go of everything when the connection drops', async () => {
     const a = harness({ 5: { title: 'a', url: 'http://a' } });
-    const sessA = await attach(a, 'wmux-page-5');
+    const sessA = await attach(a, a.idOf(5));
     await a.mux.handle({ id: 1, method: 'Runtime.enable', sessionId: sessA });
     await a.mux.handle({ id: 2, method: 'Network.enable', sessionId: sessA });
     a.commands.length = 0;
@@ -408,10 +404,10 @@ describe('TargetMultiplexer — enable is session state on a session everyone sh
 
   it('does not chase a closed pane with a disable it cannot deliver', async () => {
     const a = harness({ 5: { title: 'a', url: 'http://a' } });
-    const sessA = await attach(a, 'wmux-page-5');
+    const sessA = await attach(a, a.idOf(5));
     await a.mux.handle({ id: 1, method: 'Runtime.enable', sessionId: sessA });
     a.commands.length = 0;
-    a.mux.onTargetRemoved(5);
+    a.mux.onTargetRemoved(5, a.idOf(5));
     await a.mux.dispose();
     expect(a.commands).toEqual([]);
     // And a recycled webContents id starts clean rather than inheriting.
@@ -452,7 +448,7 @@ describe('announcements land before the reply that caused them', () => {
 
   it('Target.attachToTarget announces the session before naming it in the reply', async () => {
     const h = harness(twoPanes);
-    await h.mux.handle({ id: 3, method: 'Target.attachToTarget', params: { targetId: targetIdForWcId(4) } });
+    await h.mux.handle({ id: 3, method: 'Target.attachToTarget', params: { targetId: h.idOf(4) } });
 
     const attached = positionsOf(h.sent, 'Target.attachedToTarget');
     expect(attached).toHaveLength(1);
@@ -464,7 +460,7 @@ describe('announcements land before the reply that caused them', () => {
 
   it('Target.detachFromTarget announces the detach before the reply', async () => {
     const h = harness(twoPanes);
-    const sessionId = await attach(h, targetIdForWcId(4));
+    const sessionId = await attach(h, h.idOf(4));
     h.sent.length = 0;
     await h.mux.handle({ id: 4, method: 'Target.detachFromTarget', params: { sessionId } });
 

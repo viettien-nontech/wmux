@@ -32,26 +32,6 @@ export interface CdpTargetInfo {
   canAccessOpener: false;
 }
 
-/** The stable target id for a browser pane's webContents. */
-export function targetIdForWcId(wcId: number): string {
-  return `wmux-page-${wcId}`;
-}
-
-/**
- * The webContents behind a target id, or null when the id is not one of ours.
- *
- * Ids arrive from a client, so this rejects rather than coerces: `Number('')`
- * is 0 and `Number('12abc')` is NaN, and both would otherwise be handed to
- * `webContents.fromId`.
- */
-export function wcIdFromTargetId(targetId: unknown): number | null {
-  if (typeof targetId !== 'string') return null;
-  const match = /^wmux-page-(\d+)$/.exec(targetId);
-  if (!match) return null;
-  const wcId = Number(match[1]);
-  return Number.isSafeInteger(wcId) ? wcId : null;
-}
-
 /**
  * Which socket a WebSocket upgrade is asking for.
  *
@@ -80,6 +60,18 @@ export interface MultiplexerDeps {
   listTargets(): number[];
   /** Title/url for a pane. Returns null when its webContents is gone. */
   infoFor(wcId: number): { title: string; url: string } | null;
+  /**
+   * The target id for a pane, or null when it has none.
+   *
+   * Identity used to be computed here as `wmux-page-<wcId>`, and a webContents
+   * does not survive a React remount — so closing one browser pane re-rendered
+   * the split tree and changed EVERY other pane's target id. Asking instead
+   * lets identity hang off the surface, which does survive. See
+   * `cdp-target-registry.ts`.
+   */
+  targetIdFor(wcId: number): string | null;
+  /** The pane behind a target id, or null when nothing is attached to it. */
+  wcIdForTargetId(targetId: unknown): number | null;
   /** Send one CDP frame to the connected client. */
   send(message: unknown): void;
   /** Run a page-level command against one pane. */
@@ -138,8 +130,10 @@ export class TargetMultiplexer {
   private targetInfo(wcId: number): CdpTargetInfo | null {
     const info = this.deps.infoFor(wcId);
     if (!info) return null;
+    const targetId = this.deps.targetIdFor(wcId);
+    if (!targetId) return null;
     return {
-      targetId: targetIdForWcId(wcId),
+      targetId,
       type: 'page',
       title: info.title,
       url: info.url,
@@ -189,14 +183,14 @@ export class TargetMultiplexer {
    * expects, and the order that lets a client tear a page down before its
    * target stops existing.
    */
-  onTargetRemoved(wcId: number): void {
+  onTargetRemoved(wcId: number, targetId: string): void {
     for (const [sessionId, boundWcId] of [...this.sessions]) {
       if (boundWcId !== wcId) continue;
       this.sessions.delete(sessionId);
-      this.deps.send({ method: 'Target.detachedFromTarget', params: { sessionId, targetId: targetIdForWcId(wcId) } });
+      this.deps.send({ method: 'Target.detachedFromTarget', params: { sessionId, targetId } });
     }
     if (this.discovering) {
-      this.deps.send({ method: 'Target.targetDestroyed', params: { targetId: targetIdForWcId(wcId) } });
+      this.deps.send({ method: 'Target.targetDestroyed', params: { targetId } });
     }
     // The debugger died with the pane, so there is nothing to disable and
     // nothing worth remembering — and webContents ids are recycled, so a stale
@@ -370,7 +364,7 @@ export class TargetMultiplexer {
         this.autoAttach = params?.autoAttach === true;
         if (this.autoAttach) {
           for (const info of this.allTargetInfos()) {
-            const wcId = wcIdFromTargetId(info.targetId);
+            const wcId = this.deps.wcIdForTargetId(info.targetId);
             if (wcId === null) continue;
             if ([...this.sessions.values()].includes(wcId)) continue;
             this.emitAttached(this.openSession(wcId), info);
@@ -381,7 +375,7 @@ export class TargetMultiplexer {
       }
 
       case 'Target.attachToTarget': {
-        const wcId = wcIdFromTargetId(params?.targetId);
+        const wcId = this.deps.wcIdForTargetId(params?.targetId);
         const info = wcId === null ? null : this.targetInfo(wcId);
         if (wcId === null || !info) {
           this.reply(id, undefined, {
@@ -406,7 +400,7 @@ export class TargetMultiplexer {
         await this.releaseSessionDomains(wcId, target);
         this.deps.send({
           method: 'Target.detachedFromTarget',
-          params: { sessionId: target, targetId: targetIdForWcId(wcId) },
+          params: { sessionId: target, targetId: this.deps.targetIdFor(wcId) },
         });
         this.reply(id, undefined, { result: {} });
         return;

@@ -38,12 +38,33 @@ export const SURFACE_CLOSED_EVENT = 'wmux:surface-closed';
  *  a legacy UI kill + the store kill) are harmless. */
 export function killSurfacePty(surface: Pick<SurfaceRef, 'id' | 'type'>): void {
   announceSurfaceClosed(surface.id);
+  if (surface.type === 'browser') endCdpTarget(surface.id);
   if (surface.type !== 'terminal') return;
   try {
     (globalThis as { window?: { wmux?: { pty?: { kill?: (id: string) => void } } } }).window
       ?.wmux?.pty?.kill?.(surface.id);
   } catch {
     /* preload/window unavailable (tests) — nothing to reap */
+  }
+}
+
+/**
+ * A browser surface is really gone — end its CDP target.
+ *
+ * This has to be told from a React unmount, and this module is the one place
+ * that already can: a tab re-parented by a split-tree restructure never reaches
+ * here. Ending targets on the unmount instead is what made closing ONE browser
+ * pane change every OTHER pane's target id — the split tree re-renders, every
+ * BrowserPane unmounts, and each one detached. Measured on the running app,
+ * closing one of three panes left the right count and not one surviving id, so
+ * a client driving an untouched pane silently found zero pages where it had two.
+ */
+function endCdpTarget(surfaceId: string): void {
+  try {
+    (globalThis as { window?: { wmux?: { cdp?: { surfaceGone?: (id: string) => void } } } }).window
+      ?.wmux?.cdp?.surfaceGone?.(surfaceId);
+  } catch {
+    /* preload/window unavailable (tests) — nothing to tell */
   }
 }
 
