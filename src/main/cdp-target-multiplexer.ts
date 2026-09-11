@@ -434,16 +434,29 @@ export class TargetMultiplexer {
 
       case 'Target.detachFromTarget': {
         const target = params?.sessionId;
-        const wcId = typeof target === 'string' ? (this.wcIdOfSession(target) ?? undefined) : undefined;
-        if (wcId === undefined) {
+        /*
+         * A session EXISTS if this map holds it — not if it currently resolves
+         * to a webContents. Asking `wcIdOfSession` first answered "No session
+         * with given id found" for a session that was perfectly alive and
+         * merely between webContents, i.e. the very session this class was
+         * changed to keep alive across a remount could not be closed during
+         * the one window where closing it matters. Raised in review.
+         */
+        const targetId = typeof target === 'string' ? this.sessions.get(target) : undefined;
+        if (!targetId || typeof target !== 'string') {
           this.reply(id, undefined, { error: { code: CDP_INVALID_PARAMS, message: 'No session with given id found' } });
           return;
         }
+        const wcId = this.wcIdOfSession(target);
         this.sessions.delete(target);
-        await this.releaseSessionDomains(wcId, target);
+        /* Nothing to release while detached — the webContents it held is gone,
+           and a `disable` on a new one would turn a domain off for whoever
+           holds it there now. Same rule as the unbind path above. */
+        if (wcId !== null) await this.releaseSessionDomains(wcId, target);
         this.deps.send({
           method: 'Target.detachedFromTarget',
-          params: { sessionId: target, targetId: this.deps.targetIdFor(wcId) },
+          // From the SESSION, not derived from a webContents that may not exist.
+          params: { sessionId: target, targetId },
         });
         this.reply(id, undefined, { result: {} });
         return;

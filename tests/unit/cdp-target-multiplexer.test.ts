@@ -469,6 +469,49 @@ describe('announcements land before the reply that caused them', () => {
     expect(detached[0]).toBeLessThan(posOfReply(h.sent, 4));
   });
 
+  it('detaches a session whose pane is BETWEEN webContents', async () => {
+    /*
+     * Found in review. A session exists because the map holds it, not because
+     * it currently resolves to a webContents — and asking for the webContents
+     * first answered "No session with given id found" for a session that was
+     * perfectly alive and merely mid-remount. So the one session this class was
+     * changed to keep alive across a remount could not be closed during exactly
+     * the window where closing it matters.
+     */
+    const h = harness(twoPanes);
+    const targetId = h.idOf(4);
+    const sessionId = await attach(h, targetId);
+    h.registry.unbind(4); // unmount half of a remount: identity stays, wc goes
+    h.sent.length = 0;
+
+    await h.mux.handle({ id: 7, method: 'Target.detachFromTarget', params: { sessionId } });
+
+    expect(replyTo(h.sent, 7).error).toBeUndefined();
+    expect(replyTo(h.sent, 7).result).toEqual({});
+    const detached = framesOf(h.sent, 'Target.detachedFromTarget');
+    expect(detached).toHaveLength(1);
+    // The target id comes from the SESSION, not from a webContents that is not
+    // there — deriving it from the wc yields undefined in exactly this case.
+    expect(detached[0].params).toEqual({ sessionId, targetId });
+  });
+
+  it('still refuses a session id it never issued', async () => {
+    const h = harness(twoPanes);
+    await h.mux.handle({ id: 8, method: 'Target.detachFromTarget', params: { sessionId: 'khong-co' } });
+    expect(replyTo(h.sent, 8).error.message).toBe('No session with given id found');
+  });
+
+  it('a detached session is really gone — a second detach is refused', async () => {
+    const h = harness(twoPanes);
+    const sessionId = await attach(h, h.idOf(4));
+    h.registry.unbind(4);
+    await h.mux.handle({ id: 9, method: 'Target.detachFromTarget', params: { sessionId } });
+    h.sent.length = 0;
+
+    await h.mux.handle({ id: 10, method: 'Target.detachFromTarget', params: { sessionId } });
+    expect(replyTo(h.sent, 10).error.message).toBe('No session with given id found');
+  });
+
   it('a client that never asked to discover is told nothing', async () => {
     const h = harness(twoPanes);
     await h.mux.handle({ id: 5, method: 'Target.setDiscoverTargets', params: { discover: false } });

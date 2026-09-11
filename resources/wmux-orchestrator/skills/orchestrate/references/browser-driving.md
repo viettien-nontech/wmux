@@ -43,21 +43,42 @@ wmux browser screenshot      # capture PNG
   expanded as a positional parameter and silently matches nothing. Single-quote any eval snippet
   containing `$` (money regexes!), or write the snippet to a file.
 
-- **wmux binds a CDP endpoint on port 9222.** Don't point other CDP clients (e.g. a chrome-devtools
-  MCP configured for `127.0.0.1:9222`) at it during a session — whoever binds 9222 first wins, the
-  attachment target is nondeterministic, and teardown from another client can disrupt the wmux
-  window. Use `wmux browser …` for panel automation.
+- **wmux binds a CDP endpoint on port 9222, and a second client on it is now FINE.** This page
+  used to say "don't point other CDP clients at it"; that ban is obsolete. The endpoint is a
+  multiplexer: every open browser pane is its own target, two clients share one real debugger
+  session per pane, and a pane keeps its target id across a React remount. So a
+  chrome-devtools MCP or a puppeteer-core on `127.0.0.1:9222` can run alongside
+  `wmux browser …` on the same panes.
 
-  What ignoring that actually looks like, so it is recognised rather than rediscovered: a raw
-  `ws://localhost:9222/devtools/page/1` client answers two or three commands, and then a fresh
-  connection opens fine and **hangs at `Runtime.enable`** — no reply, no error, no close. By that
-  point `/json/list` and the panel have DIVERGED: the proxy still advertised one page target on
-  the app the client had been driving, while `wmux browser eval "location.href"` on the only
-  browser surface reported an unrelated site, and a `wmux browser screenshot` confirmed the
-  panel was showing that second site. Neither view is trustworthy while a second client is
-  attached, so don't debug the disagreement — drop the other client. Recovery is
+  `wmux browser …` is still the better tool for panel automation — it needs no client library,
+  takes `--surface`, and works identically on both browser engines. Reach for a raw CDP client
+  when you need what it cannot give: console and network events, or a real library's API.
+
+  **Three things that are still true, and are the ones that bite:**
+
+  - **Target ids are `wmux-page-<n>`, never `1`.** Read them from `/json/list`. A URL like
+    `ws://localhost:9222/devtools/page/1` names no pane; it falls back to whichever pane attached
+    most recently, which is how a client ends up driving a pane nobody asked it to.
+  - **Closing a pane really does end its target**, and a client holding that socket is told so
+    and gets its socket closed. That is a close, not a remount — a remount is silent and the
+    session follows the pane onto its new webContents.
+  - **Don't let a second client tear the first one's pane down.** Sharing a pane is supported;
+    `Target.closeTarget` on a pane somebody else is driving is still just closing their browser.
+
+  What a stale client looked like before the multiplexer, kept only so the symptom is recognised
+  rather than re-debugged: a raw `…/devtools/page/1` client answered two or three commands, then
+  a fresh connection opened fine and **hung at `Runtime.enable`** with no reply, no error and no
+  close, while `/json/list` and the panel had silently diverged. If anything resembling that is
+  seen today it is a bug worth reporting, not the expected cost of a second client. Recovery is
   `wmux browser open <url> [--surface <id>]`; the webview keeps its cookies, so a session the
   user logged into by hand survives the round trip and does not need logging in again.
+
+- **`/wmux/cdp-state` is wmux's own diagnostic**, beside `/json/list` on the same port and behind
+  the same loopback guard. `/json/list` follows Chrome and lists only ATTACHED targets, so through
+  it a target that was destroyed and one whose pane is mid-remount look identical. This one lists
+  every target that exists with `{targetId, surfaceId, wcId, attached}`, which is what tells those
+  two apart. It is not part of the CDP contract — don't build a client on it, use it to answer
+  "is this pane gone, or just between webContents?".
 
 ## Framework-specific input recipes
 

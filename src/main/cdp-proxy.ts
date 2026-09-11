@@ -446,7 +446,22 @@ export class CDPProxy {
         ws.close(1011, 'Browser panel is not open');
         return;
       }
-      this.servePageSocket(ws, wcId, forget);
+      /*
+       * The socket is handed the pane's IDENTITY, not the webContents it
+       * happens to be on — the same move `sessionId -> targetId` made for the
+       * browser socket, and for the same reason. Resolving once at connect and
+       * holding it meant that after a remount this socket kept talking to a
+       * webContents that no longer showed anything: commands went to the corpse
+       * and the live page never heard them. Found in review; the browser
+       * multiplexer had been fixed and this door left open.
+       *
+       * The fallback pane may have no identity yet, in which case there is
+       * nothing to follow and the socket stays bound as before.
+       */
+      const targetId = route?.kind === 'page' && requested !== null && this.targets.has(requested)
+        ? route.targetId
+        : this.registry.targetIdFor(wcId);
+      this.servePageSocket(ws, wcId, targetId, forget);
     });
 
     // Safety nets: never let an 'error' event become an uncaught exception.
@@ -586,8 +601,15 @@ export class CDPProxy {
     console.log('[wmux] CDP proxy: browser client connected');
   }
 
-  /** A direct socket onto one pane — the shape `/json/list` advertises. */
-  private servePageSocket(ws: WebSocket, wcId: number, forget: () => void): void {
+  /**
+   * A direct socket onto one pane — the shape `/json/list` advertises.
+   *
+   * `targetId` is who the pane IS; `wcId` is only where it happens to be right
+   * now. Every use re-resolves, and the event listener moves with the pane
+   * across a remount, so a client holding this socket keeps driving the pane it
+   * asked for rather than the webContents that pane used to live on.
+   */
+  private servePageSocket(ws: WebSocket, wcId: number, targetId: string | null, forget: () => void): void {
     const wc = webContents.fromId(wcId);
     if (!wc) {
       forget();
@@ -598,10 +620,53 @@ export class CDPProxy {
     const onDebuggerMessage = (_event: any, method: string, params: any) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ method, params }));
     };
-    wc.debugger.on('message', onDebuggerMessage);
+
+    /* Which webContents this socket's event listener currently sits on. It
+       follows the pane; `null` while the pane is between webContents. */
+    let dangNghe: number | null = null;
+    const nghe = (id: number): void => {
+      if (dangNghe === id) return;
+      thoiNghe();
+      try {
+        webContents.fromId(id)?.debugger.on('message', onDebuggerMessage);
+        dangNghe = id;
+      } catch {
+        // A pane that died between the rebind and here simply has no events.
+      }
+    };
+    const thoiNghe = (): void => {
+      if (dangNghe === null) return;
+      try { webContents.fromId(dangNghe)?.debugger.removeListener('message', onDebuggerMessage); } catch { /* pane already gone */ }
+      dangNghe = null;
+    };
+    nghe(wcId);
+
+    /*
+     * Follow the pane. A rebind is SILENT to the client on purpose — same
+     * reason as the browser socket: a remount is not a close, and announcing it
+     * makes a client watching an untouched pane see its page destroyed. A real
+     * close is different and does end the socket.
+     */
+    const client: BrowserClient = {
+      onTargetAdded: () => {},
+      onTargetRemoved: (_wcId, id) => {
+        if (targetId !== null && id !== targetId) return;
+        thoiNghe();
+        if (ws.readyState === WebSocket.OPEN) ws.close(1001, 'Browser pane closed');
+      },
+      onTargetRebound: (id) => {
+        if (targetId === null || this.registry.targetIdFor(id) !== targetId) return;
+        nghe(id);
+      },
+      onTargetUnbound: (id) => {
+        if (id === dangNghe) thoiNghe();
+      },
+    };
+    if (targetId !== null) this.browserClients.add(client);
 
     const cleanup = () => {
-      try { wc.debugger.removeListener('message', onDebuggerMessage); } catch { /* pane already gone */ }
+      this.browserClients.delete(client);
+      thoiNghe();
       forget();
     };
 
@@ -609,7 +674,11 @@ export class CDPProxy {
       let msg: any;
       try { msg = JSON.parse(data.toString()); } catch { return; }
       try {
-        const result = await this.sendCommandTo(wcId, msg.method, msg.params);
+        // Resolved per command, never captured: after a remount the pane is on
+        // a different webContents and the old one answers for nobody.
+        const hienTai = targetId !== null ? this.registry.wcIdFor(targetId) : wcId;
+        if (hienTai === null) throw new Error('Browser pane is not attached');
+        const result = await this.sendCommandTo(hienTai, msg.method, msg.params);
         ws.send(JSON.stringify({ id: msg.id, result }));
       } catch (err: any) {
         ws.send(JSON.stringify({ id: msg.id, error: { code: -32000, message: err.message } }));
