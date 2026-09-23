@@ -16,13 +16,32 @@ import {
   teardownAgentBrowser,
 } from './agent-browser-runtime';
 import { handleBridgeV2 } from './v2-bridge';
-import { distributeAgents } from './agent-manager';
+import { distributeAgents, PaneLoadInfo } from './agent-manager';
+import {
+  resolveSpawnTarget,
+  resolveSpawnWorkspace,
+  resolveSpawnPaneLoads,
+  SpawnTargetError,
+  type SpawnTargetLookups,
+} from './agent-spawn-target';
 import { PipeServer } from './pipe-server';
 import { PortScanner } from './port-scanner';
 import { CDPProxy } from './cdp-proxy';
-import { IPC_CHANNELS, SurfaceId, BrowserEngine } from '../shared/types';
-import { getPipePath, getAppDataDir, ensurePipeToken } from '../shared/instance';
-import { loadSession, saveSession, handleVersionChange, SessionData } from './session-persistence';
+import { IPC_CHANNELS, SurfaceId, BrowserEngine, PaneId, WorkspaceId } from '../shared/types';
+import { getPipePath, getAppDataDir, ensurePipeToken, getAppUserModelId } from '../shared/instance';
+import {
+  loadSession,
+  saveSession,
+  handleVersionChange,
+  savedVersion,
+  SessionData,
+  DEFAULT_SNAPSHOT_MINUTES,
+  layoutFingerprint,
+  shouldSnapshot,
+  writeSessionSnapshot,
+} from './session-persistence';
+import { noteIconRevision } from './icon-cache';
+import { installGpuWatchdog } from './gpu-watchdog';
 import { getAgentState, reportAgentSession } from './agent-state';
 import {
   stampClaudeSessionIds,
@@ -30,9 +49,11 @@ import {
   listKnownTranscriptIds,
 } from './claude-resume';
 import { sessionWindows, MAX_RESTORED_WINDOWS } from './session-windows';
-import { WindowManager } from './window-manager';
+import { WindowManager, appIconCandidates } from './window-manager';
 import { initAutoUpdater, requestUpdateNow, getUpdateState } from './updater';
+import { sweepUpdateLeftovers, UPDATE_SWEEP_DELAY_MS } from './zip-updater';
 import { initUpdateChecker, getLatestUpdate } from './update-checker';
+import { FORK_SELF_UPDATE } from './fork-updates';
 import { getChangelog } from './changelog';
 import { initAgentIntegration } from './agent-integration';
 import { applyExternalActivity, markSubagentStop, markAllAgentsDone } from './claude-observer';
@@ -277,6 +298,49 @@ function routeSpecialV2(
   return handleBridgeV2(request.method, request.params, respond, respondError);
 }
 
+// The impure half of agent-spawn-target.ts (#242): every question it asks is a
+// round trip into a renderer, because the split tree lives in the Zustand store
+// and main has no copy of it.
+//
+// Two rules, both the ones `engineForSurface` in v2-browser.ts learned:
+//
+//  - ASK EVERY WINDOW, first real answer wins. A workspace is not a window
+//    (#143), so the first window's store knows nothing about a pane in the
+//    second — and here a miss is not a benign fallback, it is the -32602 the
+//    caller gets told their live pane does not exist.
+//  - `?.` and a `.catch` on every call, so a renderer that is reloading, a
+//    destroyed webContents, or a window that predates these globals degrades to
+//    "this window doesn't have it" instead of failing the whole spawn.
+const spawnTargetLookups: SpawnTargetLookups = {
+  async workspaceForPane(paneId: string): Promise<string | null> {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue;
+      const owner = await win.webContents
+        .executeJavaScript(`window.__wmux_getWorkspaceIdForPane?.(${JSON.stringify(paneId)}) ?? null`)
+        .catch(() => null);
+      if (owner) return owner as string;
+    }
+    return null;
+  },
+  async activeWorkspaceId(): Promise<string | null> {
+    const win = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed());
+    if (!win) return null;
+    return await win.webContents
+      .executeJavaScript('window.__wmux_getActiveWorkspaceId?.() ?? null')
+      .catch(() => null);
+  },
+  async paneLoads(workspaceId: string): Promise<PaneLoadInfo[]> {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue;
+      const loads = await win.webContents
+        .executeJavaScript(`window.__wmux_getPaneLoads?.(${JSON.stringify(workspaceId)}) ?? []`)
+        .catch(() => []);
+      if (Array.isArray(loads) && loads.length > 0) return loads as PaneLoadInfo[];
+    }
+    return [];
+  },
+};
+
 // Pick which pane each agent in a batch lands in, per distribution strategy.
 function resolveAgentAssignments(strategy: string, count: number, paneLoads: any[]): string[] {
   if (strategy === 'stack') {
@@ -412,6 +476,56 @@ let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
 // "forget windows that no longer exist" would erase the whole file (issue #118).
 let isQuitting = false;
 const AUTO_SAVE_INTERVAL_MS = 30_000;
+
+// ─── Scheduled layout snapshots (issue #238) ─────────────────────────────────
+//
+// No timer of its own. The 30-second auto-save cycle above already asks every
+// window for its state and hands the merged result to `saveSession`, which is
+// exactly the data a snapshot is made of — so the snapshot rides that tick and
+// decides whether this is the one. A second timer would mean a second, slightly
+// different idea of what the current layout is, and would have to ask the
+// renderer for it all over again.
+//
+// Both of these are per-run: a snapshot on the first tick after launch is a
+// feature, not a bug — that is the state the last run left behind, which is
+// precisely what a person goes looking for after losing something.
+let lastSnapshotAt = 0;
+let lastSnapshotFingerprint = '';
+
+/**
+ * The `sessionSnapshotMinutes` pref, read off settings.json at tick time the way
+ * `confirmAppClose` and `gpuWatchdog` are — the renderer persists it there
+ * synchronously, so no IPC and no restart. An absent key means an install that
+ * predates the feature, which gets the default rather than nothing.
+ */
+function snapshotIntervalMinutes(): number {
+  try {
+    const prefs = loadSettings()['wmux-workspace-prefs'] as { sessionSnapshotMinutes?: unknown } | undefined;
+    const raw = prefs?.sessionSnapshotMinutes;
+    return typeof raw === 'number' ? raw : DEFAULT_SNAPSHOT_MINUTES;
+  } catch {
+    return DEFAULT_SNAPSHOT_MINUTES;
+  }
+}
+
+/** Snapshot this save, if the clock and the layout both say it is worth one. */
+function maybeSnapshotSession(data: SessionData): void {
+  const fingerprint = layoutFingerprint(data);
+  const now = Date.now();
+  if (!shouldSnapshot({
+    now,
+    lastAt: lastSnapshotAt,
+    intervalMinutes: snapshotIntervalMinutes(),
+    fingerprint,
+    lastFingerprint: lastSnapshotFingerprint,
+  })) return;
+  if (!writeSessionSnapshot(data, now)) return;
+  // Only a snapshot that actually reached disk moves the clock. Otherwise a
+  // failing write would sit out the whole interval and try again in five
+  // minutes, having protected nothing in between.
+  lastSnapshotAt = now;
+  lastSnapshotFingerprint = fingerprint;
+}
 
 function scheduleAutoSave(): void {
   if (autoSaveTimer !== null) {
@@ -671,8 +785,10 @@ setAnswerWriter(async (surfaceId, payload) => {
   ptyManager.write(resolved.id, payload.text ?? '');
 });
 
-// Set Windows AppUserModelId so taskbar pinning uses the correct icon & identity
-app.setAppUserModelId('com.wmux.app');
+// Set Windows AppUserModelId so taskbar pinning uses the correct icon & identity.
+// Suffixed per instance: a WMUX_INSTANCE build must not seize the installed
+// app's taskbar identity out from under it (see getAppUserModelId).
+app.setAppUserModelId(getAppUserModelId());
 
 // Auto-strip MOTW on startup so users never see security warnings or pinning failures
 stripMotw();
@@ -976,16 +1092,23 @@ app.whenReady().then(() => {
       if (!isQuitting) {
         sessionWindows.retainOnly(windowManager.getAllWindows().map((w) => w.id));
       }
-      saveSession({ version: 1, windows: sessionWindows.toArray() });
+      const merged: SessionData = { version: 1, windows: sessionWindows.toArray() };
+      saveSession(merged);
+      maybeSnapshotSession(merged);
     } else {
       // Unattributable sender (a window created outside WindowManager). Better
       // to persist its state alone than to drop the save entirely.
-      saveSession({ version: 1, windows: [state] });
+      const lone: SessionData = { version: 1, windows: [state] };
+      saveSession(lone);
+      maybeSnapshotSession(lone);
     }
     scheduleAutoSave();
   });
 
   registerIpcHandlers(windowManager, cdpProxy);
+  // A wedged GPU process freezes every window while every PTY lives on
+  // (issue #229); the renderer probes for frames, this restarts the process.
+  installGpuWatchdog();
 
   // Tree-kill whatever a previously CRASHED instance left running (issue #139).
   // `will-quit` — the only thing that calls killAll() — does not run on a crash,
@@ -1017,7 +1140,15 @@ app.whenReady().then(() => {
   });
 
   // Clear stale session data on version change (clean start for upgrades/fresh installs)
+  const previousVersion = savedVersion();
   handleVersionChange(app.getVersion());
+  // Did this update change the app icon? If so the taskbar may still draw the
+  // old one (issues #137/#226) — the renderer asks for this once and turns it
+  // into a bell notification pointing at Settings → General.
+  noteIconRevision({
+    iconPath: appIconCandidates().find((p) => p.toLowerCase().endsWith('.ico')),
+    upgraded: previousVersion !== '' && previousVersion !== app.getVersion(),
+  });
 
   // Reopen every window the last session had, not just the first (issue #118).
   // Each gets its own slot in the registry so its renderer restores its own
@@ -1067,8 +1198,45 @@ app.whenReady().then(() => {
 
   // Initialize auto-updater only when packaged (avoids errors in dev)
   if (app.isPackaged) {
-    initAutoUpdater();
-    initUpdateChecker();
+    // Never on this fork: an "update" here is a downgrade to upstream's app.
+    // See fork-updates.ts for the day that happened.
+    if (FORK_SELF_UPDATE) {
+      initAutoUpdater();
+      initUpdateChecker();
+    }
+
+    // Remove what past portable-zip updates left in %TEMP% (#3): the apply
+    // helper no longer deletes itself, and nothing else reclaims it. Outside
+    // initAutoUpdater() on purpose — that returns early on zip installs and
+    // under WMUX_DISABLE_UPDATER, and leftovers from an earlier update are
+    // still there either way. Delayed a minute because the helper that just
+    // started this process is still running `rmdir` on its payload, and to
+    // keep the I/O out of startup (#176). Unawaited and unref'd, so it never
+    // holds a quit back. Counts and error codes only in the log, never names.
+    if (process.platform === 'win32') {
+      setTimeout(() => {
+        sweepUpdateLeftovers(os.tmpdir())
+          .then(({ removed, failed }) => {
+            if (removed.length || failed.length) {
+              logDiagnostic('update-sweep', {
+                removed: removed.length,
+                failed: failed.length,
+                codes: [...new Set(failed.map((f) => f.code))].join(','),
+              });
+            }
+          })
+          // A code, never the message: the sweep walks %TEMP%, so an opendir
+          // failure carries that path — and the path carries the Windows
+          // username. Same reason `wmux crash-report` never reads the Event Log
+          // properties that hold one (#174). `sweepUpdateLeftovers` spells its
+          // per-entry failures the same way.
+          .catch((err: unknown) =>
+            logDiagnostic('update-sweep-error', {
+              code: (err as NodeJS.ErrnoException)?.code ?? 'UNKNOWN',
+            }),
+          );
+      }, UPDATE_SWEEP_DELAY_MS).unref();
+    }
   }
 
   // Late-mounted windows query the cached latest update info so the badge
@@ -1081,7 +1249,10 @@ app.whenReady().then(() => {
     getChangelog({ refresh: !!opts?.refresh }));
   // Badge click — download + install in place; the renderer falls back to the
   // release page when this says it can't (issue #125).
-  ipcMain.handle(IPC_CHANNELS.UPDATE_INSTALL, () => requestUpdateNow());
+  // The fork refuses here too: Help → update reaches this without the poller.
+  ipcMain.handle(IPC_CHANNELS.UPDATE_INSTALL, () => (FORK_SELF_UPDATE
+    ? requestUpdateNow()
+    : { handled: false, reason: 'not_supported' }));
   ipcMain.handle(IPC_CHANNELS.UPDATE_GET_STATE, () => getUpdateState());
   ipcMain.on(IPC_CHANNELS.UPDATE_OPEN_RELEASE, (_event, url: string) => {
     // Whitelist GitHub release URLs so a hostile renderer can't pivot this
@@ -1638,26 +1809,32 @@ app.whenReady().then(() => {
         (async () => {
           try {
             const params = request.params;
-            let workspaceId = params.workspaceId;
-            if (!workspaceId) {
-              const wins = BrowserWindow.getAllWindows();
-              if (wins.length > 0) {
-                workspaceId = await wins[0].webContents.executeJavaScript('window.__wmux_getActiveWorkspaceId?.()');
-              }
+            // The pane and the workspace are resolved TOGETHER (#242). They used
+            // to be independent — active workspace here, `params.paneId`
+            // verbatim there — so a pane from a non-active workspace was filed
+            // under the active one and every lookup through that record then
+            // failed on a live, running agent. See agent-spawn-target.ts.
+            let target;
+            try {
+              target = await resolveSpawnTarget(params, spawnTargetLookups);
+            } catch (err) {
+              if (err instanceof SpawnTargetError) { respondError(err.code, err.message); return; }
+              throw err;
             }
-            if (!workspaceId) { respondError(-32000, 'No active workspace'); return; }
-
-            let paneId = params.paneId;
-            if (!paneId) {
-              const paneLoads = await BrowserWindow.getAllWindows()[0]?.webContents.executeJavaScript('window.__wmux_getPaneLoads?.()');
-              if (paneLoads && paneLoads.length > 0) paneId = distributeAgents(1, paneLoads)[0];
-            }
-            if (!paneId) { respondError(-32000, 'No panes available'); return; }
+            const { paneId, workspaceId } = target;
 
             // Accept both 'cmd' and 'prompt' field names (plugins may use either)
             const cmd = params.cmd || params.prompt;
             if (!cmd) { respondError(-32602, 'Missing required field: cmd'); return; }
-            const result = agentManager.spawn({ cmd, label: params.label, cwd: params.cwd, env: params.env, paneId, workspaceId });
+            // Cast to the branded ids: both were just CONFIRMED against a live
+            // split tree by resolveSpawnTarget — the pane because a window
+            // claimed it, the workspace because it is either that pane's owner
+            // or a renderer's own active id. That is a stronger guarantee than
+            // the old code had, which passed `params.paneId` through as `any`.
+            const result = agentManager.spawn({
+              cmd, label: params.label, cwd: params.cwd, env: params.env,
+              paneId: paneId as PaneId, workspaceId: workspaceId as WorkspaceId,
+            });
 
             const win = BrowserWindow.getAllWindows()[0];
             if (win && !win.isDestroyed()) setupAgentPtyForwarding(result.surfaceId, win);
@@ -1675,15 +1852,19 @@ app.whenReady().then(() => {
         (async () => {
           try {
             const { agents: agentParams, strategy = 'distribute', workspaceId: wsId } = request.params;
-            let workspaceId = wsId;
-            if (!workspaceId) {
-              const wins = BrowserWindow.getAllWindows();
-              if (wins.length > 0) workspaceId = await wins[0].webContents.executeJavaScript('window.__wmux_getActiveWorkspaceId?.()');
+            // The batch half of #242: the panes must come from the workspace
+            // this batch is being filed under, not from whichever one happens
+            // to be active. `--workspace` used to be honoured for the record
+            // and ignored for the panes.
+            let workspaceId: string;
+            let paneLoads;
+            try {
+              workspaceId = await resolveSpawnWorkspace(wsId, spawnTargetLookups);
+              paneLoads = await resolveSpawnPaneLoads(workspaceId, spawnTargetLookups);
+            } catch (err) {
+              if (err instanceof SpawnTargetError) { respondError(err.code, err.message); return; }
+              throw err;
             }
-            if (!workspaceId) { respondError(-32000, 'No active workspace'); return; }
-
-            const paneLoads = await BrowserWindow.getAllWindows()[0]?.webContents.executeJavaScript('window.__wmux_getPaneLoads?.()') || [];
-            if (paneLoads.length === 0) { respondError(-32000, 'No panes available'); return; }
 
             const assignments = resolveAgentAssignments(strategy, agentParams.length, paneLoads);
             const win = BrowserWindow.getAllWindows()[0];
@@ -1784,6 +1965,23 @@ app.on('before-quit', () => {
 // is attached centrally here rather than at each creation site, and made
 // one-shot: the OS ends the session once, however many windows are open.
 let sessionEndHandled = false;
+
+// Close-window guard (issue #227). The pref is read off settings.json at close
+// time, not cached: the renderer writes it there synchronously on toggle, and a
+// read per × click is nothing. Bypassed whenever the app is quitting on its own
+// account — an update installing, a relaunch, Windows ending the session —
+// because a modal there blocks an update or a shutdown.
+windowManager.closeGuard = {
+  enabled: () => {
+    try {
+      const prefs = loadSettings()['wmux-workspace-prefs'] as { confirmAppClose?: unknown } | undefined;
+      return prefs?.confirmAppClose === true;
+    } catch { return false; }
+  },
+  bypass: () => isQuitting || sessionEndHandled,
+  ptyCount: () => ptyManager.count(),
+};
+
 app.on('browser-window-created', (_event, win) => {
   win.on('session-end', () => {
     if (sessionEndHandled) return;

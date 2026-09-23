@@ -399,6 +399,27 @@ export default function TerminalSettings() {
       </div>
 
       <div className="settings-divider" />
+      <h3 className="settings-section-title">{t('settings.terminalPanel.tabsSection', 'Tabs')}</h3>
+
+      <div className="settings-row">
+        <label className="settings-label">
+          {t('settings.terminalPanel.oscTitleTabs', 'Use the window title as the tab label')}
+        </label>
+        <input
+          type="checkbox"
+          className="settings-toggle"
+          checked={terminalPrefs.oscTitleTabs}
+          onChange={(e) => setTerminalPrefs({ oscTitleTabs: e.target.checked })}
+        />
+      </div>
+      <p className="settings-hint">
+        {t(
+          'settings.terminalPanel.oscTitleTabsHint',
+          'Label a terminal tab with the window title its program sets — Claude Code announces the conversation title this way. A tab you renamed yourself always keeps its name. Turn this off if your shell sets the title to its full path.',
+        )}
+      </p>
+
+      <div className="settings-divider" />
       <h3 className="settings-section-title">{t('settings.terminalPanel.scrollbackSection', 'Scrollback')}</h3>
 
       <div className="settings-row">

@@ -1,9 +1,10 @@
-import { BrowserWindow, nativeImage, screen } from 'electron';
+import { BrowserWindow, dialog, nativeImage, screen } from 'electron';
 import { v4 as uuid } from 'uuid';
 import os from 'os';
 import path from 'path';
 import type { WindowId } from '../shared/types';
 import { loadSettings } from './settings-store';
+import { closeDialogCopy, decideClose } from './close-guard';
 
 /** The window backdrop when transparency is off — matches --ui-bg-1. */
 const OPAQUE_BG = '#1a1a1a';
@@ -113,16 +114,24 @@ function storedBackdrop(): { enabled: boolean; material: WindowMaterial } {
  * most. Falls back to the .png if the .ico is missing from an older install's
  * resources, since an approximate icon beats the default Electron one.
  */
+/**
+ * Where the shipped icon lives, best first. Exported because the stale-icon
+ * notice (`icon-cache.ts`, #226) fingerprints the same file the window is
+ * handed — a second list would be a second answer to "which icon is ours".
+ */
+export function appIconCandidates(): string[] {
+  const { app } = require('electron') as typeof import('electron');
+  return app.isPackaged
+    ? [path.join(process.resourcesPath, 'icon.ico'), path.join(process.resourcesPath, 'icon.png')]
+    : [
+        path.resolve(path.join(__dirname, '../../resources/icons/icon.ico')),
+        path.resolve(path.join(__dirname, '../../resources/icon.png')),
+      ];
+}
+
 function getAppIcon(): Electron.NativeImage | undefined {
   try {
-    const { app } = require('electron') as typeof import('electron');
-    const candidates = app.isPackaged
-      ? [path.join(process.resourcesPath, 'icon.ico'), path.join(process.resourcesPath, 'icon.png')]
-      : [
-          path.resolve(path.join(__dirname, '../../resources/icons/icon.ico')),
-          path.resolve(path.join(__dirname, '../../resources/icon.png')),
-        ];
-    for (const candidate of candidates) {
+    for (const candidate of appIconCandidates()) {
       const image = nativeImage.createFromPath(candidate);
       // createFromPath returns an *empty* image rather than throwing when the
       // file is absent or unreadable, and an empty icon silently falls back to
@@ -135,6 +144,32 @@ function getAppIcon(): Electron.NativeImage | undefined {
   }
 }
 
+type SavedBounds = { x: number; y: number; width: number; height: number };
+
+/**
+ * Validate + clamp saved bounds against the display they best match. On
+ * multi-monitor + mixed-DPI setups, DIP bounds captured on one monitor can
+ * otherwise be re-applied to the wrong display and collapse the window toward
+ * the min-size floor — the "tiny window" in issue #57. Undefined means "let
+ * Electron pick".
+ */
+function clampSavedBounds(bounds: SavedBounds | undefined): SavedBounds | undefined {
+  if (!bounds) return undefined;
+  if (bounds.width < 400 || bounds.height < 300) return undefined;
+  const wa = screen.getDisplayMatching(bounds as Electron.Rectangle).workArea;
+  const intersects =
+    bounds.x < wa.x + wa.width && bounds.x + bounds.width > wa.x &&
+    bounds.y < wa.y + wa.height && bounds.y + bounds.height > wa.y;
+  if (!intersects) return undefined;
+  // Clamp size to the target work area and nudge the window fully on it,
+  // so a restore can never shrink below what that display can show.
+  const width = Math.min(bounds.width, wa.width);
+  const height = Math.min(bounds.height, wa.height);
+  const x = Math.max(wa.x, Math.min(bounds.x, wa.x + wa.width - width));
+  const y = Math.max(wa.y, Math.min(bounds.y, wa.y + wa.height - height));
+  return { x, y, width, height };
+}
+
 interface WindowEntry {
   id: WindowId;
   window: BrowserWindow;
@@ -144,10 +179,29 @@ interface WindowEntry {
    * and which need a restart.
    */
   transparent: boolean;
+  /** A close-confirm dialog is on screen for this window (issue #227). */
+  closePending: boolean;
+  /** The user answered that dialog with "close"; the re-issued close goes through. */
+  closeConfirmed: boolean;
+}
+
+/**
+ * What the close guard (#227) needs from the rest of main. Injected rather
+ * than imported: the pref lives in settings.json, the bypass flag in index.ts's
+ * quit bookkeeping, and the PTY count in the PtyManager — none of which this
+ * module should own.
+ */
+export interface CloseGuardDeps {
+  enabled: () => boolean;
+  bypass: () => boolean;
+  ptyCount: () => number;
 }
 
 export class WindowManager {
   private windows = new Map<WindowId, WindowEntry>();
+
+  /** Unset means no guard — every close goes through, as before 2.10.2. */
+  closeGuard: CloseGuardDeps | null = null;
 
   /**
    * Notified after a window is gone, so the session registry can forget its
@@ -161,33 +215,7 @@ export class WindowManager {
     maximized?: boolean,
   ): WindowId {
     const id = `win-${uuid()}` as WindowId;
-
-    // Validate + clamp saved bounds against the display they best match. On
-    // multi-monitor + mixed-DPI setups, DIP bounds captured on one monitor can
-    // otherwise be re-applied to the wrong display and collapse the window toward
-    // the min-size floor — the "tiny window" in issue #57.
-    if (bounds) {
-      if (bounds.width < 400 || bounds.height < 300) {
-        bounds = undefined;
-      } else {
-        const target = screen.getDisplayMatching(bounds as Electron.Rectangle);
-        const wa = target.workArea;
-        const intersects =
-          bounds.x < wa.x + wa.width && bounds.x + bounds.width > wa.x &&
-          bounds.y < wa.y + wa.height && bounds.y + bounds.height > wa.y;
-        if (!intersects) {
-          bounds = undefined;
-        } else {
-          // Clamp size to the target work area and nudge the window fully on it,
-          // so a restore can never shrink below what that display can show.
-          const width = Math.min(bounds.width, wa.width);
-          const height = Math.min(bounds.height, wa.height);
-          const x = Math.max(wa.x, Math.min(bounds.x, wa.x + wa.width - width));
-          const y = Math.max(wa.y, Math.min(bounds.y, wa.y + wa.height - height));
-          bounds = { x, y, width, height };
-        }
-      }
-    }
+    bounds = clampSavedBounds(bounds);
 
     const backdrop = storedBackdrop();
     // 'clear' rides on plain alpha and needs no Win11; the blur materials do.
@@ -273,13 +301,68 @@ export class WindowManager {
       this.onWindowClosed?.(id, webContentsId);
     });
 
-    this.windows.set(id, { id, window: win, transparent });
+    const entry: WindowEntry = { id, window: win, transparent, closePending: false, closeConfirmed: false };
+    // Every route to a window close lands here — the caption ×, Alt+F4, the
+    // renderer's closeWindow shortcut (`window.close()`), the frameless
+    // caption's closeSelf — so this is the one place the guard can sit.
+    win.on('close', (event) => this.guardClose(entry, event));
+
+    this.windows.set(id, entry);
     return id;
   }
 
+  /**
+   * The close guard's EFFECT (issue #227); the decision is `decideClose`.
+   * Native dialog on purpose: by the time a close can be intercepted it is
+   * already in main, and the renderer may be exactly the part that is not
+   * responding. Cancel is the default button — the dialog exists to absorb a
+   * stray click, so a stray Enter right after must not confirm it.
+   */
+  private guardClose(entry: WindowEntry, event: Electron.Event): void {
+    const guard = this.closeGuard;
+    const decision = decideClose({
+      enabled: guard?.enabled() ?? false,
+      bypass: guard?.bypass() ?? true,
+      confirmed: entry.closeConfirmed,
+      pending: entry.closePending,
+    });
+    if (decision === 'allow') return;
+    event.preventDefault();
+    if (decision === 'swallow') return;
+
+    entry.closePending = true;
+    const copy = closeDialogCopy({
+      lastWindow: this.getAllWindows().length <= 1,
+      ptyCount: guard?.ptyCount() ?? 0,
+    });
+    dialog.showMessageBox(entry.window, {
+      type: 'warning',
+      title: 'wmux',
+      message: copy.message,
+      detail: copy.detail,
+      buttons: [copy.confirmLabel, 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    }).then(({ response }) => {
+      entry.closePending = false;
+      if (response !== 0 || entry.window.isDestroyed()) return;
+      entry.closeConfirmed = true;
+      entry.window.close();
+    }, () => {
+      entry.closePending = false;
+    });
+  }
+
+  /**
+   * Programmatic close (the pipe's `close-window`, the IPC from another
+   * window). Never prompts — the same contract the workspace guard (#90)
+   * states for CLI and agent closes.
+   */
   closeWindow(id: WindowId): void {
     const entry = this.windows.get(id);
     if (entry && !entry.window.isDestroyed()) {
+      entry.closeConfirmed = true;
       entry.window.close();
     }
   }
@@ -381,17 +464,20 @@ export class WindowManager {
       // setBackgroundColor re-lands an opaque surface. Nothing to apply — the
       // opacity itself is a renderer-side alpha, not a window property.
       if (wantsTransparent) continue;
-      try {
-        entry.window.setBackgroundColor(enabled ? TRANSPARENT_BG : OPAQUE_BG);
-        if (supportsBackdropMaterial()) {
-          entry.window.setBackgroundMaterial(
-            enabled && material !== 'clear' ? material : 'none',
-          );
-        }
-      } catch {
-        // Window went away mid-loop, or the platform rejected the material.
-      }
+      applyOpaqueBackdrop(entry.window, enabled, material);
     }
     return { needsRestart };
+  }
+}
+
+/** The live half of setBackdrop, for a window built with an opaque backing. */
+function applyOpaqueBackdrop(win: BrowserWindow, enabled: boolean, material: WindowMaterial): void {
+  try {
+    win.setBackgroundColor(enabled ? TRANSPARENT_BG : OPAQUE_BG);
+    if (supportsBackdropMaterial()) {
+      win.setBackgroundMaterial(enabled && material !== 'clear' ? material : 'none');
+    }
+  } catch {
+    // Window went away mid-loop, or the platform rejected the material.
   }
 }

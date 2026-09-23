@@ -3,6 +3,7 @@ import * as path from 'path';
 import { promises as fsp } from 'fs';
 import { IPC_CHANNELS, SurfaceId, WindowId, WorkspaceId, AgentId, type InsertionResult, type ExplorerListError } from '../shared/types';
 import { observePtyData, clearActivity } from './claude-observer';
+import { createPtyDataBatcher } from './pty-data-batcher';
 import { clearAgentState, noteHumanInput, listAgentStates } from './agent-state';
 import { PtyManager } from './pty-manager';
 import { PtyLedger, reapOrphans } from './pty-ledger';
@@ -27,6 +28,7 @@ import { parseWindowsTerminalConfig, parseGhosttyConfig, loadProjectProfiles, im
 import { loadUserConfig, getConfigPath, resetConfigWarnings } from './user-config';
 import { loadUserLocales } from './user-locales';
 import { WindowManager, supportsBackdropMaterial, supportsTransparency, toWindowMaterial } from './window-manager';
+import { refreshShellIconCache, takeIconChangeNotice } from './icon-cache';
 import { CDPBridge } from './cdp-bridge';
 import { CDPProxy, danhSachSurfaceHopLe } from './cdp-proxy';
 import { AgentManager } from './agent-manager';
@@ -549,14 +551,24 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
         return created;
       }
       const window = BrowserWindow.fromWebContents(_event.sender);
-      const unsubData = ptyManager.onData(id, (data) => {
+      // Batch the per-chunk stream before it crosses IPC: one send per ~4ms
+      // window per pane instead of one per ConPTY chunk, which is what kept
+      // keystroke echo waiting behind other panes' output under load. The
+      // observer reads the same batched bytes — identical lines in identical
+      // order — so its ANSI-strip/regex pass drops to the same cadence.
+      const batcher = createPtyDataBatcher((data) => {
         if (window && !window.isDestroyed()) {
           window.webContents.send(IPC_CHANNELS.PTY_DATA, id, data);
         }
         // Feed Claude Code observer for sidebar activity display
         try { observePtyData(id, data); } catch {}
       });
+      const unsubData = ptyManager.onData(id, (data) => batcher.push(data));
       const unsubExit = ptyManager.onExit(id, (code) => {
+        // Trailing output must land before the exit notification, or the
+        // renderer paints the exit over bytes still sitting in the window.
+        batcher.flush();
+        batcher.dispose();
         if (window && !window.isDestroyed()) {
           window.webContents.send(IPC_CHANNELS.PTY_EXIT, id, code);
         }
@@ -1497,6 +1509,30 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
     }
   });
 
+  // Windows shell icon cache (issues #137/#226). The confirm lives HERE, not in
+  // the renderer: the action closes every File Explorer window the user has
+  // open, and the process that does it must be the one that said so.
+  ipcMain.handle(IPC_CHANNELS.SYSTEM_REFRESH_ICON_CACHE, async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const { response } = await dialog.showMessageBox(win as BrowserWindow, {
+      type: 'warning',
+      title: 'wmux',
+      message: 'Restart Windows Explorer to refresh the icon cache?',
+      detail:
+        'The taskbar disappears for a second and any open File Explorer windows close. ' +
+        'Your terminals and wmux itself are not affected. This is the only way Windows ' +
+        'lets a taskbar or pinned button pick up a changed icon.',
+      buttons: ['Restart Explorer', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    });
+    if (response !== 0) return { ran: false };
+    refreshShellIconCache();
+    return { ran: true };
+  });
+  ipcMain.handle(IPC_CHANNELS.SYSTEM_TAKE_ICON_CHANGE_NOTICE, () => takeIconChangeNotice());
+
   ipcMain.handle(IPC_CHANNELS.SYSTEM_PICK_FOLDER, async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
     const result = await dialog.showOpenDialog(win as BrowserWindow, {
@@ -1512,12 +1548,17 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
 
 export function setupAgentPtyForwarding(surfaceId: string, window: BrowserWindow): void {
   ownSurface(surfaceId as SurfaceId, window.webContents);
-  const unsubData = ptyManager.onData(surfaceId as SurfaceId, (data) => {
+  // Same batching as the PTY_CREATE forwarder — agent panes are the panes most
+  // likely to stream hard, so they need it most.
+  const batcher = createPtyDataBatcher((data) => {
     if (window && !window.isDestroyed()) {
       window.webContents.send(IPC_CHANNELS.PTY_DATA, surfaceId, data);
     }
   });
+  const unsubData = ptyManager.onData(surfaceId as SurfaceId, (data) => batcher.push(data));
   const unsubExit = ptyManager.onExit(surfaceId as SurfaceId, (code) => {
+    batcher.flush();
+    batcher.dispose();
     if (window && !window.isDestroyed()) {
       window.webContents.send(IPC_CHANNELS.PTY_EXIT, surfaceId, code);
     }

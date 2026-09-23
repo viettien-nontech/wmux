@@ -35,19 +35,24 @@ const FEATURES: Array<{ key: Feature; labelKey: TranslationKey; labelFallback: s
     key: 'instructions',
     labelKey: 'settings.integration.instructions',
     labelFallback: 'Agent instructions',
-    pathHint: '~/.claude/CLAUDE.md · ~/.config/opencode/AGENTS.md · ~/.kiro/steering/wmux.md',
+    pathHint: '~/.claude/CLAUDE.md · ~/.config/opencode/AGENTS.md · ~/.kiro/steering/wmux.md · ~/.omp/agent/AGENTS.md · ~/.pi/agent/AGENTS.md',
   },
   {
     key: 'hooks',
     labelKey: 'settings.integration.hooks',
     labelFallback: 'Status hooks',
-    pathHint: '~/.claude/settings.json',
+    pathHint: '~/.claude/settings.json · ~/.pi/agent/extensions/wmux.js',
   },
   {
     key: 'orchestrator',
     labelKey: 'settings.integration.orchestrator',
     labelFallback: 'Orchestrator plugin',
-    pathHint: '~/.claude/plugins/ · ~/.config/opencode/plugin/',
+    // OpenCode only since 2.12.0. The Claude Code plugin this also used to
+    // install is deprecated (issue #239) and is uninstalled whichever way this
+    // toggle is set, so naming ~/.claude/plugins/ here would promise a write
+    // that no longer happens — and the hint is the only place a user can see
+    // what a checkbox actually touches.
+    pathHint: '~/.config/opencode/plugin/',
   },
   {
     key: 'browserMcp',

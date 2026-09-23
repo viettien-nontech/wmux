@@ -9,6 +9,7 @@ import { IconAdd, IconSplit, IconSplitDown, IconClose, IconCaret } from './icons
 import type { SurfaceDragPayload, SurfaceDragPreviewTarget } from './drag-preview-types';
 import { parseSurfaceDragData } from './surface-drag-preview';
 import { getSurfaceLabel } from './surface-label';
+import { useOscTitleLookup } from './use-osc-title';
 
 interface SurfaceTabBarProps {
   paneId: PaneId;
@@ -109,6 +110,9 @@ export default function SurfaceTabBar({
   const renameSurface = useStore((state) => state.renameSurface);
   const surfaceProgress = useStore((state) => state.surfaceProgress);
   const getAgentMeta = (surfaceId: string) => agentMeta.get(surfaceId as any);
+  // The OSC 0/2 title the pane's program set, when the tab has no name of its
+  // own (issue #221). Gated on terminalPrefs.oscTitleTabs inside the hook.
+  const oscTitleFor = useOscTitleLookup();
 
   // Declared and detected agent state, so a blocked BACKGROUND tab is visible.
   // Precedence is not re-derived here — surfaceAgentState owns it, so the tab
@@ -400,11 +404,11 @@ export default function SurfaceTabBar({
                   }}
                   onBlur={commitRename}
                   onClick={(e) => e.stopPropagation()}
-                  placeholder={getSurfaceLabel(surface, agentMeta?.label, workspaceShell, t)}
+                  placeholder={getSurfaceLabel(surface, agentMeta?.label, workspaceShell, t, oscTitleFor(surface.id))}
                 />
               ) : (
                 <span className={`surface-tab__label${surface.ephemeral ? ' surface-tab__label--ephemeral' : ''}`}>
-                  {getSurfaceLabel(surface, agentMeta?.label, workspaceShell, t)}
+                  {getSurfaceLabel(surface, agentMeta?.label, workspaceShell, t, oscTitleFor(surface.id))}
                 </span>
               )}
               {surfaces.length > 1 && !isRenaming && (

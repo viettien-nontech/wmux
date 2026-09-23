@@ -453,13 +453,33 @@ export function removeClaudeHooks(): void {
 }
 
 /**
+ * Where Claude Code actually reads user-scope MCP servers from (issue #237).
+ *
+ * NOT `~/.claude/settings.json`, which is where wmux wrote this for six
+ * releases. `settings.json` has no `mcpServers` key — its schema strips unknown
+ * keys rather than erroring, so the entry landed in a file, changed nothing, and
+ * `ensureChromeDevtoolsConfig` logged a success. `claude mcp list` never showed
+ * it. That is the whole of #237's first blocker, and it is a silent failure by
+ * construction: there is no observable difference between "written" and
+ * "written somewhere nobody reads" unless you go and look.
+ *
+ * `~/.claude.json`'s top-level `mcpServers` is the user scope — what
+ * `claude mcp add --scope user` writes. `settings.json` holds only the
+ * approval/policy keys (`enabledMcpjsonServers`, `allowedMcpServers`, …), which
+ * is why the `enabledPlugins` half below stays exactly where it was.
+ */
+function getClaudeConfigPath(): string {
+  return path.join(os.homedir(), '.claude.json');
+}
+
+/**
  * Version selected for this wmux release. Do not use a mutable npm dist-tag
- * here: this command is persisted in Claude's settings and may execute long
+ * here: this command is persisted in Claude's config and may execute long
  * after the wmux release that wrote it.
  */
 export const CHROME_DEVTOOLS_MCP_PACKAGE = 'chrome-devtools-mcp@1.7.0';
 
-/** Build the custom MCP server entry written to Claude's settings. */
+/** Build the custom MCP server entry written to Claude's user config. */
 export function buildChromeDevtoolsMcpServer(): { command: string; args: string[] } {
   return {
     command: 'npx',
@@ -468,7 +488,7 @@ export function buildChromeDevtoolsMcpServer(): { command: string; args: string[
 }
 
 /**
- * Whether a `chrome-devtools` entry already in settings.json is one wmux wrote.
+ * Whether a `chrome-devtools` entry already in Claude's config is one wmux wrote.
  *
  * The predicate has to be "did wmux author this", not "is this what wmux wants".
  * Pinning the package (#161) means the desired entry changes on every release
@@ -495,267 +515,317 @@ export function isWmuxAuthoredMcpEntry(entry: unknown): boolean {
   );
 }
 
+/** The `mcpServers` object of a parsed config, or undefined if there isn't a usable one. */
+function mcpServersOf(config: unknown): Record<string, unknown> | undefined {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return undefined;
+  const servers = (config as Record<string, unknown>).mcpServers;
+  if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return undefined;
+  return servers as Record<string, unknown>;
+}
+
 /**
- * Configures chrome-devtools-mcp to connect to wmux's CDP proxy on localhost:9222.
- * Disables the plugin version and adds a custom MCP server in settings.json with
- * --browserUrl pointing to wmux. This is more reliable than modifying the plugin cache.
+ * Put the `chrome-devtools` entry into a parsed `~/.claude.json`, or report that
+ * it is already right.
+ *
+ * Pure and separate from the write because `~/.claude.json` is Claude Code's own
+ * live state file — it holds the OAuth account, per-project history, onboarding
+ * flags — and wmux rewrites it whole. Every needless write is a chance to lose
+ * something Claude Code wrote a millisecond earlier, so "changed" has to be
+ * exact, not approximate.
  */
-export function ensureChromeDevtoolsConfig(): void {
+export function applyChromeDevtoolsMcp(config: unknown): { next: any; changed: boolean } {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    return { next: config, changed: false };
+  }
+  const next = config as Record<string, any>;
+  const existing = mcpServersOf(next)?.['chrome-devtools'];
+  // Somebody else's entry stands; wmux does not get to retune it.
+  if (existing && !isWmuxAuthoredMcpEntry(existing)) return { next, changed: false };
+  const desired = buildChromeDevtoolsMcpServer();
+  if (existing && JSON.stringify(existing) === JSON.stringify(desired)) return { next, changed: false };
+  if (!mcpServersOf(next)) next.mcpServers = {};
+  next.mcpServers['chrome-devtools'] = desired;
+  return { next, changed: true };
+}
+
+/**
+ * The inverse: drop the entry, and the `mcpServers` object with it if wmux's was
+ * the only one in there — an empty key left behind is still a footprint in a
+ * file wmux was asked to stay out of.
+ *
+ * Matches on {@link isWmuxAuthoredMcpEntry}, not on the port alone: a user who
+ * has since pointed `chrome-devtools` at their own Chrome keeps it.
+ *
+ * This is also the migration for #237's first blocker. Older releases wrote the
+ * entry into `~/.claude/settings.json`, where it did nothing; the same function
+ * clears it from there, because the shape is identical and it is wmux's litter
+ * either way. It is actively confusing litter: #237 was reported by someone who
+ * found the entry sitting in settings.json, correct in every detail, while
+ * `claude mcp list` disagreed.
+ */
+export function stripChromeDevtoolsMcp(config: unknown): { next: any; changed: boolean } {
+  const next = config as Record<string, any>;
+  const servers = mcpServersOf(config);
+  if (!servers || !('chrome-devtools' in servers)) return { next, changed: false };
+  if (!isWmuxAuthoredMcpEntry(servers['chrome-devtools'])) return { next, changed: false };
+  delete servers['chrome-devtools'];
+  if (Object.keys(servers).length === 0) delete next.mcpServers;
+  return { next, changed: true };
+}
+
+/** Parsed JSON at `filePath`, or null if it is missing or unreadable. */
+function readJsonIfExists(filePath: string): any {
   try {
-    const settingsPath = getSettingsPath();
-    if (!fs.existsSync(settingsPath)) return;
-
-    const raw = fs.readFileSync(settingsPath, 'utf-8');
-    let settings: any;
-    try { settings = JSON.parse(raw); } catch { return; }
-
-    let changed = false;
-
-    // Disable the plugin (it launches its own Chrome)
-    if (settings.enabledPlugins?.['chrome-devtools-mcp@claude-plugins-official'] !== false) {
-      if (!settings.enabledPlugins) settings.enabledPlugins = {};
-      settings.enabledPlugins['chrome-devtools-mcp@claude-plugins-official'] = false;
-      changed = true;
-    }
-
-    // Add as custom MCP server with --browserUrl.
-    //
-    // Written when there is no entry at all, and rewritten only when the entry
-    // present is one wmux itself authored — which is how the @latest → pinned
-    // migration reaches existing installs without wmux clobbering an entry the
-    // user has since retuned. See isWmuxAuthoredMcpEntry.
-    if (!settings.mcpServers) settings.mcpServers = {};
-    const existing = settings.mcpServers['chrome-devtools'];
-    const desired = buildChromeDevtoolsMcpServer();
-    const mine = !existing || isWmuxAuthoredMcpEntry(existing);
-    if (mine && JSON.stringify(existing) !== JSON.stringify(desired)) {
-      settings.mcpServers['chrome-devtools'] = desired;
-      changed = true;
-    }
-
-    if (changed) {
-      fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
-      console.log('[wmux] Configured chrome-devtools-mcp as custom MCP server → localhost:9222');
-    }
-  } catch (err) {
-    console.warn('[wmux] Failed to configure chrome-devtools-mcp:', err);
+    if (!fs.existsSync(filePath)) return null;
+    return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  } catch {
+    return null;
   }
 }
 
 /**
- * Undo {@link ensureChromeDevtoolsConfig} (issue #132): drop the MCP server
- * entry wmux added and stop forcing the official plugin off.
+ * Write a parsed config back over Claude Code's live state file.
  *
- * Only an entry that points at wmux's own CDP proxy port is removed — a user
- * who has since pointed `chrome-devtools` somewhere of their own keeps it.
- * Likewise the `enabledPlugins` flag is only cleared when it is still `false`,
- * the value wmux set; a user who deliberately re-enabled it is left alone.
+ * Temp-file + rename, for the reason `session-persistence.ts` spells out at
+ * length (#214): a plain `writeFileSync` over 160 KB of somebody else's state
+ * leaves a truncated file readable if the process dies mid-write, and this
+ * particular file holds the user's Claude Code login. `renameSync` maps onto
+ * `MoveFileExW`/`MOVEFILE_REPLACE_EXISTING`, so the old file is replaced rather
+ * than ever being absent.
  */
-export function removeChromeDevtoolsConfig(): void {
+function writeJsonAtomic(filePath: string, value: unknown): void {
+  const tmp = filePath + '.wmux.tmp';
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf-8');
+    fs.renameSync(tmp, filePath);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // The temp file is already gone, or is locked by whatever just failed the
+      // write. Either way the original config is untouched, which is the only
+      // thing this cleanup is protecting.
+    }
+    throw err;
+  }
+}
+
+/**
+ * The `~/.claude.json` half, both directions. Guarded on the file existing:
+ * wmux does not bring Claude Code's state file into being on a machine where
+ * Claude Code has never run, and an absent file means there is no install to
+ * configure either.
+ */
+function syncClaudeConfigMcp(wanted: boolean): void {
+  try {
+    const configPath = getClaudeConfigPath();
+    const config = readJsonIfExists(configPath);
+    if (!config) return;
+    const { next, changed } = wanted ? applyChromeDevtoolsMcp(config) : stripChromeDevtoolsMcp(config);
+    if (!changed) return;
+    writeJsonAtomic(configPath, next);
+    console.log(
+      wanted
+        ? '[wmux] Configured chrome-devtools-mcp in ~/.claude.json → localhost:9222'
+        : '[wmux] Removed chrome-devtools-mcp from ~/.claude.json'
+    );
+  } catch (err) {
+    console.warn('[wmux] Failed to update chrome-devtools-mcp in ~/.claude.json:', err);
+  }
+}
+
+/**
+ * The `~/.claude/settings.json` half: the official plugin's enabled flag, which
+ * genuinely IS read from here, plus the removal of the MCP entry older releases
+ * wrote into this file by mistake. The stale entry goes on BOTH paths, so an
+ * existing install is cleaned up by the upgrade rather than by the user first
+ * having to switch the feature off.
+ */
+function syncSettingsPluginFlag(wanted: boolean): void {
+  const pluginKey = 'chrome-devtools-mcp@claude-plugins-official';
   try {
     const settingsPath = getSettingsPath();
-    if (!fs.existsSync(settingsPath)) return;
-    const raw = fs.readFileSync(settingsPath, 'utf-8');
-    let settings: any;
-    try { settings = JSON.parse(raw); } catch { return; }
+    const settings = readJsonIfExists(settingsPath);
+    if (!settings) return;
 
-    let changed = false;
-    const entry = settings.mcpServers?.['chrome-devtools'];
-    if (entry && JSON.stringify(entry).includes('9222')) {
-      delete settings.mcpServers['chrome-devtools'];
-      if (Object.keys(settings.mcpServers).length === 0) delete settings.mcpServers;
-      changed = true;
-    }
-    const pluginKey = 'chrome-devtools-mcp@claude-plugins-official';
-    if (settings.enabledPlugins?.[pluginKey] === false) {
+    let changed = stripChromeDevtoolsMcp(settings).changed;
+
+    if (wanted) {
+      // The official plugin launches its own Chrome, which is the thing being
+      // replaced.
+      if (settings.enabledPlugins?.[pluginKey] !== false) {
+        if (!settings.enabledPlugins) settings.enabledPlugins = {};
+        settings.enabledPlugins[pluginKey] = false;
+        changed = true;
+      }
+    } else if (settings.enabledPlugins?.[pluginKey] === false) {
+      // Only `false` — the value wmux set. A user who deliberately re-enabled
+      // the plugin keeps their `true`.
       delete settings.enabledPlugins[pluginKey];
       if (Object.keys(settings.enabledPlugins).length === 0) delete settings.enabledPlugins;
       changed = true;
     }
 
-    if (changed) {
-      fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
-      console.log('[wmux] Removed chrome-devtools-mcp configuration from ~/.claude/settings.json');
-    }
+    if (changed) fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
   } catch (err) {
-    console.warn('[wmux] Failed to remove chrome-devtools-mcp config:', err);
+    console.warn('[wmux] Failed to update the chrome-devtools plugin flag:', err);
   }
 }
 
 /**
- * Recursively copies a directory tree from src to dest.
- * Creates dest and any intermediate directories as needed.
- */
-function copyDirSync(src: string, dest: string): void {
-  fs.mkdirSync(dest, { recursive: true });
-  const entries = fs.readdirSync(src, { withFileTypes: true });
-  for (const entry of entries) {
-    const srcPath = path.join(src, entry.name);
-    const destPath = path.join(dest, entry.name);
-    if (entry.isDirectory()) {
-      copyDirSync(srcPath, destPath);
-    } else {
-      fs.copyFileSync(srcPath, destPath);
-    }
-  }
-}
-
-/**
- * Auto-installs the wmux-orchestrator plugin into Claude Code's plugin cache.
- * - Copies resources/wmux-orchestrator/ → ~/.claude/plugins/cache/wmux-orchestrator/{version}/
- * - Registers in ~/.claude/plugins/installed_plugins.json
- * - Enables in ~/.claude/settings.json
- * Skips if already installed at the same version.
- */
-export function ensureOrchestratorPlugin(): void {
-  try {
-    // 1. Locate plugin source directory
-    let pluginSrcDir: string;
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const { app } = require('electron') as typeof import('electron');
-      if (app.isPackaged) {
-        pluginSrcDir = path.join(process.resourcesPath, 'wmux-orchestrator');
-      } else {
-        pluginSrcDir = path.resolve(path.join(__dirname, '../../resources/wmux-orchestrator'));
-      }
-    } catch {
-      pluginSrcDir = path.resolve(path.join(__dirname, '../../resources/wmux-orchestrator'));
-    }
-
-    const pluginJsonSrc = path.join(pluginSrcDir, '.claude-plugin', 'plugin.json');
-    if (!fs.existsSync(pluginJsonSrc)) {
-      console.warn('[wmux] wmux-orchestrator plugin not found at', pluginSrcDir);
-      return;
-    }
-
-    // 2. Read version from plugin.json
-    let pluginMeta: any;
-    try {
-      pluginMeta = JSON.parse(fs.readFileSync(pluginJsonSrc, 'utf-8'));
-    } catch {
-      console.warn('[wmux] Failed to parse wmux-orchestrator plugin.json');
-      return;
-    }
-    const version: string = pluginMeta.version || '0.0.0';
-
-    // 3. Copy to ~/.claude/plugins/cache/wmux-orchestrator/{version}/
-    const claudeDir = path.join(os.homedir(), '.claude');
-    const cacheDir = path.join(claudeDir, 'plugins', 'cache', 'wmux-orchestrator', version);
-    const targetPluginJson = path.join(cacheDir, '.claude-plugin', 'plugin.json');
-
-    // Check if already installed at same version
-    if (fs.existsSync(targetPluginJson)) {
-      try {
-        const existing = JSON.parse(fs.readFileSync(targetPluginJson, 'utf-8'));
-        if (existing.version === version) {
-          // Already installed at same version — skip copy, but still ensure registration
-          ensurePluginRegistered(cacheDir, version, claudeDir);
-          return;
-        }
-      } catch {
-        // Corrupted target — re-install
-      }
-    }
-
-    // Remove old version directory if it exists (clean install)
-    if (fs.existsSync(cacheDir)) {
-      fs.rmSync(cacheDir, { recursive: true, force: true });
-    }
-
-    // Copy entire plugin directory
-    copyDirSync(pluginSrcDir, cacheDir);
-    console.log(`[wmux] Installed wmux-orchestrator v${version} to plugin cache`);
-
-    // 4–5. Register and enable
-    ensurePluginRegistered(cacheDir, version, claudeDir);
-  } catch (err) {
-    console.warn('[wmux] Failed to install wmux-orchestrator plugin:', err);
-  }
-}
-
-/**
- * Registers the orchestrator plugin in installed_plugins.json and enables it in settings.json.
- */
-function ensurePluginRegistered(installPath: string, version: string, claudeDir: string): void {
-  const pluginKey = 'wmux-orchestrator@wmux';
-
-  // Register in installed_plugins.json
-  try {
-    const installedPath = path.join(claudeDir, 'plugins', 'installed_plugins.json');
-    let installed: any = {};
-    if (fs.existsSync(installedPath)) {
-      try { installed = JSON.parse(fs.readFileSync(installedPath, 'utf-8')); } catch { installed = {}; }
-    } else {
-      fs.mkdirSync(path.dirname(installedPath), { recursive: true });
-    }
-
-    const now = new Date().toISOString();
-    const existing = installed[pluginKey];
-    if (!existing || existing.version !== version || existing.installPath !== installPath) {
-      installed[pluginKey] = {
-        scope: 'user',
-        installPath,
-        version,
-        installedAt: existing?.installedAt || now,
-        lastUpdated: now,
-      };
-      fs.writeFileSync(installedPath, JSON.stringify(installed, null, 2), 'utf-8');
-      console.log('[wmux] Registered wmux-orchestrator in installed_plugins.json');
-    }
-  } catch (err) {
-    console.warn('[wmux] Failed to register plugin in installed_plugins.json:', err);
-  }
-
-  // Enable in settings.json
-  try {
-    const settingsPath = path.join(claudeDir, 'settings.json');
-    if (!fs.existsSync(settingsPath)) return;
-
-    const raw = fs.readFileSync(settingsPath, 'utf-8');
-    let settings: any;
-    try { settings = JSON.parse(raw); } catch { return; }
-
-    if (!settings.enabledPlugins) settings.enabledPlugins = {};
-    if (settings.enabledPlugins[pluginKey] !== true) {
-      settings.enabledPlugins[pluginKey] = true;
-      fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
-      console.log('[wmux] Enabled wmux-orchestrator in settings.json');
-    }
-  } catch (err) {
-    console.warn('[wmux] Failed to enable plugin in settings.json:', err);
-  }
-}
-
-/**
- * Uninstall the orchestrator plugin wmux auto-installed (issue #132): remove its
- * plugin-cache directory, its registration, and its enabled flag.
+ * Point chrome-devtools-mcp at wmux's CDP proxy on localhost:9222, and stop the
+ * official plugin from launching a Chrome of its own.
  *
- * Only the `wmux-orchestrator@wmux` key is touched, and only the cache path
- * wmux itself wrote to — a plugin the user installed by hand from the standalone
- * repo lives under a different install path and survives.
+ * Two files, because the two halves are read from two places (issue #237): the
+ * server definition goes to `~/.claude.json`, the plugin flag stays in
+ * `~/.claude/settings.json`.
+ */
+export function ensureChromeDevtoolsConfig(): void {
+  syncClaudeConfigMcp(true);
+  syncSettingsPluginFlag(true);
+}
+
+/**
+ * Undo {@link ensureChromeDevtoolsConfig} (issue #132): drop the MCP server
+ * entry wmux added — from both the file it belongs in and the file older
+ * releases put it in — and stop forcing the official plugin off.
+ */
+export function removeChromeDevtoolsConfig(): void {
+  syncClaudeConfigMcp(false);
+  syncSettingsPluginFlag(false);
+}
+
+
+
+/**
+ * The bundled wmux-orchestrator plugin, DEPRECATED in 2.12.0 (issue #239).
+ *
+ * wmux used to copy `resources/wmux-orchestrator/` into Claude Code's plugin
+ * cache and hand-write `~/.claude/plugins/installed_plugins.json` to register
+ * it. That never worked, and #239 is the careful report of why: the file uses a
+ * v2 schema — `{ version: 2, plugins: { "<plugin>@<marketplace>": [ … ] } }` —
+ * and wmux wrote its entry at the TOP LEVEL, as an object rather than an array,
+ * under a cache layout (`cache/<plugin>/<version>`) that is not Claude's
+ * (`cache/<marketplace>/<plugin>/<version>`) either. Claude Code therefore never
+ * listed the plugin, never loaded its skills or commands, and marked the copied
+ * tree `.orphaned_at` for garbage collection — while `enabledPlugins` said
+ * `true` and wmux logged a successful install.
+ *
+ * The obvious repair is to ship a real local marketplace and register through a
+ * supported path, and that is the right fix for a plugin worth keeping. This one
+ * is not: parallel agent orchestration is now something Claude Code does itself,
+ * far better than a shell-script wave planner driving panes from the outside.
+ * So the plugin is retired rather than re-plumbed, and wmux writes NOTHING into
+ * Claude Code's plugin machinery any more.
+ *
+ * What remains is the inverse, below. Deprecating a feature that spent releases
+ * writing into someone else's config is not "stop writing" — it is "stop
+ * writing, and take back what was written", the same rule #132 set for every
+ * other integration. Anyone who still wants the orchestrator can install it as
+ * a normal plugin from github.com/amirlehmam/wmux-orchestrator; wmux's sidebar
+ * orchestration panel keeps reading its state file either way.
+ */
+
+/** The key wmux used in both `installed_plugins.json` and `enabledPlugins`. */
+const ORCHESTRATOR_PLUGIN_KEY = 'wmux-orchestrator@wmux';
+
+/**
+ * Whether a top-level `installed_plugins.json` value is the malformed entry
+ * wmux wrote — and so is safe to delete without asking anyone.
+ *
+ * Two independent things say "wmux wrote this". It sits at the top level, where
+ * Claude Code puts nothing (its own entries live under `plugins`), and it is a
+ * bare object, where Claude Code stores an ARRAY of install records. A value
+ * that is an array is left alone on principle: it is not a shape wmux ever
+ * produced, so whatever put it there is better placed than this function to
+ * decide it should go.
+ */
+export function isWmuxOrchestratorRegistration(entry: unknown): boolean {
+  return !!entry && typeof entry === 'object' && !Array.isArray(entry);
+}
+
+/**
+ * Take wmux's orchestrator entries out of a parsed `installed_plugins.json`.
+ *
+ * Pure, and returns whether anything changed, because the caller must not
+ * rewrite a file it had no reason to touch — a needless write to Claude Code's
+ * own state file is exactly the kind of uninvited edit #132 was filed about.
+ *
+ * `plugins[ORCHESTRATOR_PLUGIN_KEY]` is deliberately NOT removed. That is where
+ * a plugin installed the supported way lands, which is precisely what the
+ * deprecation notice tells people to do instead — so removing it would uninstall
+ * the replacement while cleaning up the thing it replaced.
+ */
+export function pruneOrchestratorRegistration(installed: unknown): { next: any; changed: boolean } {
+  if (!installed || typeof installed !== 'object' || Array.isArray(installed)) {
+    return { next: installed, changed: false };
+  }
+  const next = installed as Record<string, unknown>;
+  if (!isWmuxOrchestratorRegistration(next[ORCHESTRATOR_PLUGIN_KEY])) {
+    return { next, changed: false };
+  }
+  delete next[ORCHESTRATOR_PLUGIN_KEY];
+  return { next, changed: true };
+}
+
+/**
+ * Whether `enabledPlugins["wmux-orchestrator@wmux"]` is still wmux's to clear.
+ *
+ * It is not, once the plugin is properly installed under `plugins` — at that
+ * point the flag is what keeps a user's own, hand-installed orchestrator
+ * switched on, and clearing it would silently disable it. The flag only goes
+ * when there is no real installation behind it, which is the state every
+ * install wmux created is in.
+ */
+export function orchestratorFlagIsStale(settings: unknown, installed: unknown): boolean {
+  const s = settings as { enabledPlugins?: Record<string, unknown> } | null | undefined;
+  if (!s?.enabledPlugins || !(ORCHESTRATOR_PLUGIN_KEY in s.enabledPlugins)) return false;
+  const registry = (installed ?? {}) as { plugins?: Record<string, unknown> };
+  const properly = registry.plugins?.[ORCHESTRATOR_PLUGIN_KEY];
+  return !(Array.isArray(properly) ? properly.length > 0 : !!properly);
+}
+
+/**
+ * Remove every trace of the auto-installed orchestrator plugin: the cache tree
+ * wmux copied, its malformed registration, and the enabled flag that pointed at
+ * neither.
+ *
+ * Runs on EVERY launch that reaches {@link applyConsent} now, not only when the
+ * feature is switched off — a deprecated integration has no "on". It is
+ * idempotent and silent when there is nothing of wmux's to find, which is the
+ * state of a fresh install and of every user who declined #132's prompt.
+ *
+ * `cache/wmux-orchestrator/` is wmux's own invention: Claude Code nests a plugin
+ * under its marketplace (`cache/<marketplace>/<plugin>/<version>`), so nothing
+ * but wmux ever wrote this path, and a hand-installed copy is somewhere else.
  */
 export function removeOrchestratorPlugin(): void {
-  const pluginKey = 'wmux-orchestrator@wmux';
   const claudeDir = path.join(os.homedir(), '.claude');
+  const installedPath = path.join(claudeDir, 'plugins', 'installed_plugins.json');
 
   try {
     const cacheRoot = path.join(claudeDir, 'plugins', 'cache', 'wmux-orchestrator');
     if (fs.existsSync(cacheRoot)) {
       fs.rmSync(cacheRoot, { recursive: true, force: true });
-      console.log('[wmux] Removed wmux-orchestrator from the plugin cache');
+      console.log('[wmux] Removed the deprecated wmux-orchestrator plugin from the Claude Code cache');
     }
   } catch (err) {
     console.warn('[wmux] Failed to remove orchestrator plugin cache:', err);
   }
 
+  // Read once and reuse: the enabled-flag decision below needs to know whether a
+  // real installation exists, and that answer lives in this same file.
+  let installed: any = null;
   try {
-    const installedPath = path.join(claudeDir, 'plugins', 'installed_plugins.json');
-    if (fs.existsSync(installedPath)) {
-      const installed = JSON.parse(fs.readFileSync(installedPath, 'utf-8'));
-      if (installed[pluginKey]) {
-        delete installed[pluginKey];
-        fs.writeFileSync(installedPath, JSON.stringify(installed, null, 2), 'utf-8');
+    if (fs.existsSync(installedPath)) installed = JSON.parse(fs.readFileSync(installedPath, 'utf-8'));
+  } catch { installed = null; }
+
+  try {
+    if (installed) {
+      const { next, changed } = pruneOrchestratorRegistration(installed);
+      if (changed) {
+        fs.writeFileSync(installedPath, JSON.stringify(next, null, 2), 'utf-8');
+        console.log('[wmux] Removed the wmux-orchestrator entry from installed_plugins.json');
       }
     }
   } catch (err) {
@@ -766,12 +836,12 @@ export function removeOrchestratorPlugin(): void {
     const settingsPath = path.join(claudeDir, 'settings.json');
     if (!fs.existsSync(settingsPath)) return;
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-    if (settings.enabledPlugins?.[pluginKey] === undefined) return;
-    delete settings.enabledPlugins[pluginKey];
+    if (!orchestratorFlagIsStale(settings, installed)) return;
+    delete settings.enabledPlugins[ORCHESTRATOR_PLUGIN_KEY];
     if (Object.keys(settings.enabledPlugins).length === 0) delete settings.enabledPlugins;
     fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
-    console.log('[wmux] Disabled wmux-orchestrator in ~/.claude/settings.json');
+    console.log('[wmux] Cleared the stale wmux-orchestrator flag in ~/.claude/settings.json');
   } catch (err) {
-    console.warn('[wmux] Failed to disable orchestrator plugin:', err);
+    console.warn('[wmux] Failed to clear the orchestrator plugin flag:', err);
   }
 }

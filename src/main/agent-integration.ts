@@ -1,12 +1,16 @@
 /**
  * Consent gate for everything wmux writes outside its own directory (issue #132).
  *
- * wmux integrates with Claude Code, OpenCode, Kiro and omp by editing files in
- * the user's home: it appends a block to ~/.claude/CLAUDE.md,
- * ~/.config/opencode/AGENTS.md and ~/.omp/agent/AGENTS.md, writes
- * ~/.kiro/steering/wmux.md, registers eight hook families in
- * ~/.claude/settings.json, points chrome-devtools-mcp at its own CDP proxy, and
- * installs Claude Code and OpenCode orchestrator plugins.
+ * wmux integrates with Claude Code, OpenCode, Kiro, omp and pi by editing files
+ * in the user's home: it appends a block to ~/.claude/CLAUDE.md,
+ * ~/.config/opencode/AGENTS.md, ~/.omp/agent/AGENTS.md and pi's user-scope
+ * context file, writes ~/.kiro/steering/wmux.md, registers eight hook families
+ * in ~/.claude/settings.json, installs a status extension into
+ * ~/.pi/agent/extensions/, points chrome-devtools-mcp at its own CDP proxy, and
+ * installs an OpenCode orchestrator plugin.
+ *
+ * It also used to install a Claude Code plugin, which is deprecated and gone
+ * (issue #239). Its uninstall is not: see `removeOrchestratorPlugin`.
  *
  * All of that used to happen unconditionally on every launch, with no prompt and
  * no record of a decision — so deleting any of it was futile, because the next
@@ -29,7 +33,6 @@ import {
   ensureClaudeContext,
   ensureClaudeHooks,
   ensureChromeDevtoolsConfig,
-  ensureOrchestratorPlugin,
   removeClaudeContext,
   removeClaudeHooks,
   removeChromeDevtoolsConfig,
@@ -43,6 +46,12 @@ import {
 } from './opencode-context';
 import { ensureKiroContext, removeKiroContext } from './kiro-context';
 import { ensureOmpContext, removeOmpContext } from './omp-context';
+import {
+  ensurePiContext,
+  ensurePiExtension,
+  removePiContext,
+  removePiExtension,
+} from './pi-context';
 import { loadSettings, saveSetting } from './settings-store';
 
 export type IntegrationDecision = 'unset' | 'granted' | 'declined';
@@ -83,15 +92,18 @@ export const DEFAULT_CONSENT: IntegrationConsent = { decision: 'unset', features
 export const INTEGRATION_CONSENT_DETAIL =
   'wmux can teach your coding agents to drive its browser panel, markdown views ' +
   'and sidebar status. Doing so edits files in your home directory:\n\n' +
-  '  • ~/.claude/CLAUDE.md, ~/.config/opencode/AGENTS.md and ~/.omp/agent/AGENTS.md\n' +
+  '  • ~/.claude/CLAUDE.md, ~/.config/opencode/AGENTS.md, ~/.omp/agent/AGENTS.md\n' +
+  '    and ~/.pi/agent/AGENTS.md\n' +
   '      a wmux section, between markers, leaving your own text untouched\n' +
   '  • ~/.kiro/steering/wmux.md\n' +
   '      a steering file of wmux\'s own; your other Kiro steering is untouched\n' +
   '  • ~/.claude/settings.json\n' +
   '      eight hook families: PostToolUse, Notification, Stop, SubagentStop,\n' +
   '      SessionStart, UserPromptSubmit, PreToolUse and SessionEnd\n' +
-  '  • ~/.claude/plugins/ and ~/.config/opencode/plugin/wmux.js\n' +
-  '      the wmux-orchestrator plugins\n' +
+  '  • ~/.pi/agent/extensions/wmux.js\n' +
+  '      a pi extension that reports this pane\'s status to the sidebar\n' +
+  '  • ~/.config/opencode/plugin/wmux.js\n' +
+  '      the wmux orchestrator plugin for OpenCode\n' +
   '  • ~/.claude/settings.json\n' +
   '      a pinned chrome-devtools-mcp pointed at the browser panel instead of its own Chrome\n\n' +
   '"Not now" asks again next launch. "Never" writes nothing and removes anything ' +
@@ -137,16 +149,37 @@ export function writeConsent(consent: IntegrationConsent): void {
 function applyFeature(feature: IntegrationFeature, enabled: boolean): void {
   switch (feature) {
     case 'instructions':
-      if (enabled) { ensureClaudeContext(); ensureOpencodeContext(); ensureKiroContext(); ensureOmpContext(); }
-      else { removeClaudeContext(); removeOpencodeContext(); removeKiroContext(); removeOmpContext(); }
+      if (enabled) {
+        ensureClaudeContext(); ensureOpencodeContext(); ensureKiroContext();
+        ensureOmpContext(); ensurePiContext();
+      } else {
+        removeClaudeContext(); removeOpencodeContext(); removeKiroContext();
+        removeOmpContext(); removePiContext();
+      }
       break;
     case 'hooks':
-      if (enabled) ensureClaudeHooks();
-      else removeClaudeHooks();
+      // The pi extension belongs here and not under `orchestrator` because the
+      // panel's own label for this toggle is "Status hooks", and that is
+      // precisely what it is: a per-event reporter, no orchestration. The
+      // OpenCode plugin does the same job from under `orchestrator`, which is a
+      // pre-existing mismatch deliberately left alone — moving it would
+      // silently re-enable a status bridge for every user who switched that
+      // toggle off, which is the #132 complaint in reverse.
+      if (enabled) { ensureClaudeHooks(); ensurePiExtension(); }
+      else { removeClaudeHooks(); removePiExtension(); }
       break;
     case 'orchestrator':
-      if (enabled) { ensureOrchestratorPlugin(); ensureOpencodePlugin(); }
-      else { removeOrchestratorPlugin(); removeOpencodePlugin(); }
+      // The Claude Code half of this feature is DEPRECATED (issue #239) and has
+      // no `enabled` branch left: the bundled plugin never loaded — wmux wrote
+      // Claude Code's `installed_plugins.json` in a shape it does not read — and
+      // parallel orchestration is now something Claude Code does natively and
+      // better. Its removal runs in BOTH branches on purpose: a retired
+      // integration that cleans up only when you switch it off leaves its
+      // wreckage on every machine where the toggle is still on, which is exactly
+      // where it already is. Only OpenCode's plugin still has an `enabled` side.
+      removeOrchestratorPlugin();
+      if (enabled) ensureOpencodePlugin();
+      else removeOpencodePlugin();
       break;
     case 'browserMcp':
       if (enabled) ensureChromeDevtoolsConfig();
@@ -181,7 +214,7 @@ export function applyConsent(consent: IntegrationConsent): void {
  * assuming an answer.
  *
  * Deliberately enumerates the exact paths. "wmux would like to integrate with
- * Claude Code" is not consent; naming the four files it will edit is.
+ * Claude Code" is not consent; naming every file it will edit is.
  */
 export async function promptForConsent(parent?: Electron.BrowserWindow): Promise<IntegrationDecision | null> {
   try {
@@ -193,7 +226,7 @@ export async function promptForConsent(parent?: Electron.BrowserWindow): Promise
       defaultId: 0,
       cancelId: 1,
       title: 'wmux — agent integration',
-      message: 'Let wmux set up Claude Code, OpenCode and Kiro?',
+      message: 'Let wmux set up Claude Code, OpenCode, Kiro, omp and pi?',
       detail: INTEGRATION_CONSENT_DETAIL,
       noLink: true,
     };

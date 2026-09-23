@@ -13,6 +13,7 @@ import type { Translator } from '../i18n/core';
 import { collectActiveTerminalSurfaceIds } from '../store/split-utils';
 import { SplitNode, SurfaceId, ThemeConfig, type InsertionResult } from '../../shared/types';
 import { UserColorScheme } from '../store/settings-slice';
+import { normalizeOscTitle } from '../store/osc-title-slice';
 import { terminalBgAlpha } from '../store/backdrop';
 import { activateTerminalLink, terminalLinkHandler } from '../utils/terminal-links';
 import {
@@ -24,9 +25,14 @@ import {
 } from '../utils/mouse-modes';
 import { attachVisibleRenderer, RendererHandle } from '../utils/terminal-renderer';
 import { resetTerminalModes } from '../utils/terminal-reset';
+import { windowsPtyCompat } from '../utils/windows-pty';
+import { ReplayHold } from '../utils/replay-hold';
+import { createTouchPanTracker } from '../utils/touch-pan';
+import { wheelForward, type WheelSource } from '../utils/wheel-forward';
 import { trimTrailingWhitespace } from '../utils/copy-text';
-import { handleShiftEnter, isShiftEnter } from './terminal-keys';
+import { handleShiftEnter, isLetterKey, isShiftEnter } from './terminal-keys';
 import { applyKeyRemap } from '../key-remaps';
+import { claimsKeyEvent } from '../utils/shortcut-binding';
 import { isConEmuSubcommand } from './osc9';
 import { forgetSurface as forgetPromptLog, handlePromptMark, refreshHighlights } from '../utils/prompt-log';
 import {
@@ -110,16 +116,26 @@ function clearStuckRunningState(surfaceId: string): void {
 // can replay it (issue #49). Normal buffer only, so a TUI's own SIGWINCH
 // redraw owns the alt screen after remount. Bounded LRU so a genuine pane
 // close (no remount to consume it) can't grow the cache.
-function snapshotSurfaceBuffer(surfaceId: string | undefined, serializeAddon: SerializeAddon): void {
+function snapshotSurfaceBuffer(
+  surfaceId: string | undefined,
+  serializeAddon: SerializeAddon,
+  terminal: Terminal,
+): void {
   if (!surfaceId) return;
   try {
-    const snapshot = serializeAddon.serialize({ excludeAltBuffer: true });
-    if (!snapshot) return;
+    const text = serializeAddon.serialize({ excludeAltBuffer: true });
+    if (!text) return;
     if (surfaceBufferCache.size >= MAX_BUFFER_CACHE) {
       const oldest = surfaceBufferCache.keys().next().value;
       if (oldest !== undefined) surfaceBufferCache.delete(oldest);
     }
-    surfaceBufferCache.set(surfaceId, snapshot);
+    // The dimensions travel with the text because the replay only reproduces
+    // the original screen at the original size: SerializeAddon restores the
+    // cursor to its VIEWPORT row, and the PTY on the other side is still the
+    // size we last told it. Replaying into a differently-sized buffer therefore
+    // lands the cursor a different number of rows from the bottom than ConPTY
+    // has it, and nothing afterwards corrects that. See restoreSurfaceBuffer.
+    surfaceBufferCache.set(surfaceId, { text, cols: terminal.cols, rows: terminal.rows });
   } catch {
     // Serialization failure is non-fatal — just lose the snapshot.
   }
@@ -295,7 +311,15 @@ function mouseModesFor(surfaceId: string): MouseModeState {
 // different depth/parent), disposing and recreating the terminal — which would
 // otherwise wipe the scrollback (issue #49). We snapshot on unmount and replay
 // on the next mount. Bounded so genuine pane closes can't leak the cache.
-const surfaceBufferCache = new Map<string, string>();
+interface BufferSnapshot {
+  /** SerializeAddon output — the normal buffer only. */
+  text: string;
+  /** The size the terminal (and so the PTY) had when it was taken. */
+  cols: number;
+  rows: number;
+}
+
+const surfaceBufferCache = new Map<string, BufferSnapshot>();
 const MAX_BUFFER_CACHE = 32;
 
 // Live xterm instances keyed by surfaceId, so the pipe bridge can read screen
@@ -352,24 +376,69 @@ function resolveSurfaceTerminal(surfaceId: string): Terminal | undefined {
  */
 export const surfaceTitle = new Map<string, string>();
 
-/** Longest title kept. A title is chrome; anything longer is a program misusing OSC. */
-const MAX_TITLE_CHARS = 256;
+/**
+ * How long a burst of title changes is coalesced before one store write, in ms.
+ *
+ * Deduping alone is not enough. A program running a spinner in its own title
+ * ("⠋ building", "⠙ building", …) emits DISTINCT titles at ~10 Hz, and the tab
+ * bar subscribes to the store — so one write per change is a re-render of every
+ * subscriber at PTY speed, which is the shape of issue #141. Trailing, so the
+ * value that lands is always the newest one and never a stale frame of the
+ * spinner.
+ *
+ * The detection map above is written on EVERY change, unthrottled: it is a plain
+ * Map that nothing subscribes to, and the detection loop wants the latest fact.
+ */
+const OSC_TITLE_STORE_THROTTLE_MS = 200;
+
+/** surfaceId → its pending trailing-throttle timer, so a burst arms only one. */
+const titleFlushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * Publish a surface's title into the store, at most once per throttle window.
+ *
+ * The store's own setter no-ops on an unchanged title, so a shell that re-emits
+ * the same title on every prompt costs a timer and nothing else.
+ */
+function publishTitle(surfaceId: string): void {
+  if (titleFlushTimers.has(surfaceId)) return;
+  titleFlushTimers.set(surfaceId, setTimeout(() => {
+    titleFlushTimers.delete(surfaceId);
+    useStore.getState().setOscTitle(surfaceId, surfaceTitle.get(surfaceId) ?? '');
+  }, OSC_TITLE_STORE_THROTTLE_MS));
+}
 
 /**
  * Record OSC 0/2 for a surface. Returns the disposable, or null for a surface
  * with no id.
  *
- * Recorded, not RENDERED: wmux tab titles are the user's to set (renameSurface),
- * and letting any program rewrite them would take that away. The value exists
- * only as detection evidence.
+ * Two consumers now, and the second one is issue #221. It used to be recorded
+ * and never RENDERED, on the reasoning that wmux tab titles are the user's to
+ * set and letting a program rewrite them would take that away. That reasoning
+ * survives intact and is now expressed by the label chain instead: an explicit
+ * `renameSurface` still wins outright, and the title only fills the gap where
+ * the tab had no name of its own — where it beats naming every pane after the
+ * one directory they are all sitting in.
+ *
+ * Normalised on the way IN rather than per consumer, so the detection loop and
+ * the tab bar can never disagree about what the program said.
  */
 function recordTitleChanges(terminal: Terminal, surfaceId: string | undefined) {
   if (!surfaceId) return null;
   return terminal.onTitleChange((title) => {
-    const trimmed = (title ?? '').trim().slice(0, MAX_TITLE_CHARS);
-    if (trimmed) surfaceTitle.set(surfaceId, trimmed);
+    const normalized = normalizeOscTitle(title);
+    if (normalized) surfaceTitle.set(surfaceId, normalized);
     else surfaceTitle.delete(surfaceId);
+    publishTitle(surfaceId);
   });
+}
+
+/** Forget a closed surface's pending title flush, so it cannot resurrect the entry. */
+export function forgetSurfaceTitle(surfaceId: string): void {
+  const timer = titleFlushTimers.get(surfaceId);
+  if (timer) clearTimeout(timer);
+  titleFlushTimers.delete(surfaceId);
+  surfaceTitle.delete(surfaceId);
 }
 
 /**
@@ -405,16 +474,78 @@ function registerPromptMarks(terminal: Terminal, surfaceId: string | undefined) 
   // Declining an unrecognised subtype (iTerm2 and kitty both define vendor
   // extensions on this code) passes it on down xterm's handler chain — the same
   // rule the OSC 9 handler documents, for the same reason.
-  return terminal.onScroll(() => handleAnchorScroll(terminal, surfaceId));
+  const scroll = terminal.onScroll(() => handleAnchorScroll(terminal, surfaceId));
+
+  // Rebuild the highlights after a resize (issue #230).
+  //
+  // Not because the marks die — they do not: xterm 6 reflows markers with their
+  // content, so a band's row survives a narrow/widen intact. It is the
+  // decoration that goes stale. Its `width` was `terminal.cols` at registration
+  // time, so widening a pane leaves every band stopping short of the new right
+  // edge; and a resize is precisely when a full-screen TUI repaints everything
+  // it owns, which is when a band is most likely to have stopped sitting on its
+  // prompt. Rebuilding re-runs the content check on every entry at once.
+  //
+  // Trailing-debounced because a window drag emits a resize per frame while up
+  // to 200 decorations per surface would be torn down and rebuilt on each —
+  // the shape issue #141 is a standing warning against. `onResize` already only
+  // fires when the geometry actually changed.
+  let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+  const resize = terminal.onResize(() => {
+    if (resizeTimer !== null) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      resizeTimer = null;
+      try { refreshHighlights(terminal, surfaceId); } catch { /* a disposed terminal */ }
+    }, 150);
+  });
+
+  return {
+    dispose() {
+      if (resizeTimer !== null) clearTimeout(resizeTimer);
+      scroll.dispose();
+      resize.dispose();
+    },
+  };
 }
 
-// Convert a wheel delta to a line count (sign preserved, magnitude ≥ 1).
-function wheelDeltaToLines(ev: WheelEvent, rows: number): number {
-  let amount: number;
-  if (ev.deltaMode === 1 /* DOM_DELTA_LINE */) amount = ev.deltaY;
-  else if (ev.deltaMode === 2 /* DOM_DELTA_PAGE */) amount = ev.deltaY * (rows || 24);
-  else amount = ev.deltaY / 17;
+// Per-surface fractional-line accumulator for pixel-precision devices
+// (touchpads, high-resolution mice). Those fire many events per second with
+// tiny sub-line deltaY values, and the old `Math.max(1, round)` forced EVERY
+// such micro-event to a whole line — so a gentle two-finger drag became a fast,
+// jerky line-at-a-time jump. We now carry the sub-line remainder between events
+// and only emit whole lines, which is what makes touchpad scrolling smooth.
+const wheelLineAccum = new Map<string, number>();
+
+// Round a line/page-mode delta away from zero so a notched wheel always moves at
+// least one line per detent.
+function snapWheelLines(amount: number): number {
+  if (amount === 0) return 0;
   return Math.sign(amount) * Math.max(1, Math.round(Math.abs(amount)));
+}
+
+// Convert a wheel event to a line count (sign preserved).
+//   line/page mode (notched wheels)   → at least one line per event
+//   pixel mode (touchpads, precision) → accumulate against the REAL cell height
+//                                        and emit only whole lines, keeping the
+//                                        remainder for the next event
+function wheelDeltaToLines(
+  ev: WheelEvent,
+  terminal: Terminal,
+  host: HTMLElement | null,
+  surfaceId: string | undefined,
+): number {
+  if (ev.deltaMode === 1 /* DOM_DELTA_LINE */) return snapWheelLines(ev.deltaY);
+  if (ev.deltaMode === 2 /* DOM_DELTA_PAGE */) return snapWheelLines(ev.deltaY * (terminal.rows || 24));
+  // DOM_DELTA_PIXEL. Use the measured cell height rather than a fixed 17px so the
+  // mapping tracks the user's font size; fall back to 17 only when geometry is
+  // unavailable (host not laid out yet).
+  const rect = host?.getBoundingClientRect();
+  const cellH = rect && terminal.rows > 0 ? rect.height / terminal.rows : 17;
+  const key = surfaceId ?? '__no-surface__';
+  const acc = (wheelLineAccum.get(key) ?? 0) + ev.deltaY / cellH;
+  const lines = Math.trunc(acc);
+  wheelLineAccum.set(key, acc - lines);
+  return lines;
 }
 
 // Approximate the terminal cell (1-based col/row) under the mouse pointer so
@@ -438,10 +569,34 @@ function pointerCell(
   return { col, row };
 }
 
+// Marks a wheel event as SYNTHESIZED from a touch pan (issue #245). The
+// touch-pan handler below dispatches real `WheelEvent`s so a finger inherits
+// every behaviour the wheel has (#243) — but the two gestures do NOT agree on
+// how many app-level reports a line is worth, and `wheelForward` needs to be
+// told which one it is looking at.
+//
+// A private property rather than `ev.isTrusted`, which answers "who dispatched
+// this" and not "what gesture is this": the next synthetic wheel from anywhere
+// else would silently inherit touch semantics. The producer and the consumer
+// are forty lines apart in this file, so this is a local protocol and not a
+// module.
+const TOUCH_WHEEL = Symbol('wmux:touch-wheel');
+function markTouchWheel(ev: WheelEvent): WheelEvent {
+  (ev as unknown as Record<symbol, boolean>)[TOUCH_WHEEL] = true;
+  return ev;
+}
+function wheelSource(ev: WheelEvent): WheelSource {
+  return (ev as unknown as Record<symbol, boolean>)[TOUCH_WHEEL] ? 'touch' : 'wheel';
+}
+
 // Forward a wheel scroll to the PTY for an app that owns the screen (alt buffer
 // or mouse-tracking): SGR wheel reports (button 64=up/65=down) at the pointer
 // cell when mouse tracking is on, else arrow keys (matching xterm's native
 // _handlePassiveWheel fallback for non-mouse pagers like less/man).
+//
+// HOW MANY reports that is lives in `wheel-forward.ts` and is not obvious — one
+// per EVENT for a mouse-tracking app, one per LINE for everything else. See
+// that file; getting it wrong is #245.
 function writeWheelToPty(
   ev: WheelEvent,
   terminal: Terminal,
@@ -450,15 +605,12 @@ function writeWheelToPty(
   count: number,
   mouseTracking: boolean,
 ): void {
-  let seq: string;
-  if (mouseTracking) {
-    const { col, row } = pointerCell(ev, terminal, host);
-    const btn = count < 0 ? 64 : 65; // 64 = wheel-up, 65 = wheel-down
-    seq = `\x1b[<${btn};${col};${row}M`;
-  } else {
-    seq = count < 0 ? '\x1b[A' : '\x1b[B'; // arrow keys for non-mouse pagers
-  }
-  for (let i = 0; i < Math.abs(count); i++) window.wmux.pty.write(ptyId, seq);
+  const { col, row } = mouseTracking
+    ? pointerCell(ev, terminal, host)
+    : { col: 0, row: 0 }; // unused by the arrow branch
+  const write = wheelForward({ lines: count, mouseTracking, source: wheelSource(ev), col, row });
+  if (!write) return;
+  for (let i = 0; i < write.repeats; i++) window.wmux.pty.write(ptyId, write.seq);
 }
 
 // Capture-phase wheel handler. We always take ownership (xterm's own forwarding
@@ -482,7 +634,7 @@ function handleTerminalWheel(
   if (!isAltBuffer && !isMouseEnabled) {
     ev.preventDefault();
     ev.stopPropagation();
-    const lines = wheelDeltaToLines(ev, terminal.rows);
+    const lines = wheelDeltaToLines(ev, terminal, host, surfaceId);
     if (lines !== 0) terminal.scrollLines(lines);
     return;
   }
@@ -490,7 +642,7 @@ function handleTerminalWheel(
   ev.preventDefault();
   ev.stopPropagation();
   if (!ptyId) return;
-  const count = wheelDeltaToLines(ev, terminal.rows);
+  const count = wheelDeltaToLines(ev, terminal, host, surfaceId);
   if (count !== 0) writeWheelToPty(ev, terminal, host, ptyId, count, isMouseEnabled);
 }
 
@@ -503,15 +655,22 @@ function scheduleInitialResize(
   fit: () => void,
   fitAddon: FitAddon,
   ptyIdRef: { current: string | null },
+  replayHold: ReplayHold,
   attempt = 0,
 ): void {
+  // This is the resize that was measured taking the snapshot replay from 28
+  // rows to 60 before it had been parsed: it runs from the PTY-attach
+  // continuation, which is asynchronous and therefore races xterm's write
+  // buffer. `fit()` refuses on its own while held; the PTY must be left alone
+  // too, or the sides simply diverge from the other direction.
+  if (replayHold.isHolding) return;
   fit();
   const dims = fitAddon.proposeDimensions();
   if (dims) {
     window.wmux.pty.resize(ptyId, dims.cols, dims.rows);
   } else if (attempt < 8) {
     requestAnimationFrame(() => {
-      if (ptyIdRef.current === ptyId) scheduleInitialResize(ptyId, fit, fitAddon, ptyIdRef, attempt + 1);
+      if (ptyIdRef.current === ptyId) scheduleInitialResize(ptyId, fit, fitAddon, ptyIdRef, replayHold, attempt + 1);
     });
   }
 }
@@ -557,6 +716,13 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
   const terminalRef = useRef<HTMLDivElement | null>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  /**
+   * Pins the terminal to a snapshot's size while that snapshot is being
+   * replayed. A ref because `fit()` and every effect that resizes have to see
+   * the SAME latch as the mount effect that set it; it is replaced per mount so
+   * a hold can never survive the terminal it belonged to.
+   */
+  const replayHoldRef = useRef<ReplayHold>(new ReplayHold());
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const ptyIdRef = useRef<string | null>(null);
   const cleanupFnsRef = useRef<Array<() => void>>([]);
@@ -607,6 +773,13 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
   };
 
   const fit = () => {
+    // A snapshot replay pins the terminal to the size the snapshot was taken
+    // at until it has actually been PARSED — `terminal.write()` is async, so
+    // resizing before that lays the replay out at the wrong height and strands
+    // the restored cursor. Gated here rather than at each caller because
+    // fit() is reached from the ResizeObserver, the PTY attach, the visibility
+    // effect and the theme effect, and one ungated path is enough to lose it.
+    if (!replayHoldRef.current.request()) return;
     if (fitAddonRef.current) {
       try {
         fitAddonRef.current.fit();
@@ -641,6 +814,12 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
       allowProposedApi: true,
       linkHandler: terminalLinkHandler,
       scrollback: prefs.scrollbackLines || 10000,
+      // Every wmux PTY is ConPTY, and xterm grows rows differently for one.
+      // Without this a pane that gets TALLER (an adjacent pane closed, the
+      // window resized) leaves xterm and ConPTY disagreeing about which row the
+      // cursor is on, and the prompt strands itself in the middle of old output.
+      // See utils/windows-pty.ts for the mechanism.
+      windowsPty: windowsPtyCompat(window.wmux?.system?.osRelease ?? ''),
     });
 
     xtermRef.current = terminal;
@@ -705,6 +884,20 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
     // Open terminal in the DOM
     terminal.open(terminalRef.current);
 
+    // Size the buffer to the pane BEFORE anything is written into it. xterm
+    // starts every terminal at 80x24, so a remount that replays a snapshot
+    // (below) used to lay ~200 lines of scrollback into a 24-row buffer and only
+    // reach the rAF fit() further down afterwards — a single ~20-row growth on
+    // an already-full buffer, which is the largest possible dose of the ConPTY
+    // row-growth mismatch windowsPty above exists to prevent. Safe to run
+    // synchronously here: proposeDimensions only needs the element laid out,
+    // which it is once open() has attached to it. The rAF fit() stays as the
+    // safety net for a pane that is not measurable yet (a hidden tab).
+    fit();
+
+    const replayHold = new ReplayHold();
+    replayHoldRef.current = replayHold;
+
     if (surfaceId) surfaceTerminalRegistry.set(surfaceId, terminal);
 
     const titleDisposable = recordTitleChanges(terminal, surfaceId);
@@ -718,7 +911,32 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
       const snapshot = surfaceBufferCache.get(surfaceId);
       if (snapshot) {
         surfaceBufferCache.delete(surfaceId);
-        terminal.write(snapshot);
+        // Replay at the size the snapshot was taken at, undoing the fit()
+        // above — and HELD there, not merely set there. SerializeAddon restores
+        // the cursor to its VIEWPORT row, so the replayed screen agrees with
+        // ConPTY's about where the cursor is only at the size ConPTY still has;
+        // and `terminal.write()` is asynchronous, so a bare resize pins only the
+        // size the bytes are QUEUED at. A remount is triggered by a split-tree
+        // change — exactly when the pane's size changed — so the PTY attach, the
+        // ResizeObserver and the visibility effect are all racing the parse. The
+        // hold is what keeps them out of it; see utils/replay-hold.ts for the
+        // measurement. Growing to the pane's real size then happens once, in the
+        // write callback, applied to BOTH sides in step — which with windowsPty
+        // set moves the cursor the same way on each.
+        replayHold.hold();
+        terminal.resize(snapshot.cols, snapshot.rows);
+        terminal.write(snapshot.text, () => {
+          // Parsed at last. Release, and pay back the one size sync that was
+          // refused while we held — the pane's real size, applied to xterm and
+          // the PTY together, which is the single in-step growth `windowsPty`
+          // makes correct on both sides.
+          if (!replayHold.release()) return;
+          fit();
+          const dims = fitAddonRef.current?.proposeDimensions();
+          if (dims && ptyIdRef.current) {
+            window.wmux.pty.resize(ptyIdRef.current, dims.cols, dims.rows);
+          }
+        });
       }
 
       // Put the replacement terminal back into the mouse modes the STILL-RUNNING
@@ -763,6 +981,78 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
     wheelHost.addEventListener('wheel', onWheelCapture, { capture: true, passive: false });
     cleanupFnsRef.current.push(() => {
       wheelHost.removeEventListener('wheel', onWheelCapture, { capture: true } as any);
+    });
+
+    // Touch pan → wheel (issue #243). A finger dragged over a pane scrolled
+    // nothing: xterm 6.0.0 replaced its native overflow scroller with a
+    // wheel-only overlay and shipped no touch replacement, and wmux added no
+    // fallback of its own.
+    //
+    // This SYNTHESIZES a wheel event rather than calling scrollLines, and that
+    // is the whole design. `handleTerminalWheel` just above already decides
+    // between scrollback, SGR wheel reports and arrow keys for a pager on the
+    // alt screen; routing the gesture through it means a finger behaves
+    // identically to the wheel in every pane, including the alt-screen agent
+    // TUIs (opencode, Claude Code, Codex) that upstream's own fix would still
+    // leave inert — the alternate buffer has no scrollback for it to move.
+    //
+    // POINTER events, not Touch events: Electron delivers pointer events
+    // reliably while the Touch Events API is not guaranteed to be enabled.
+    // `pointerType === 'touch'` is the gate, so a mouse or a pen never reaches
+    // any of this and the wheel path is untouched on a machine with no
+    // touchscreen.
+    //
+    // `clientX/clientY` are carried onto the synthetic event because
+    // `handleTerminalWheel` reads them: with mouse tracking on it reports the
+    // wheel at the pointer's CELL, and an event without coordinates would
+    // report every flick at the top-left corner.
+    //
+    // preventDefault is called only while actually panning — `{ passive: false }`
+    // is what makes that legal. A horizontal drag is deliberately left alone so
+    // that whatever the platform does with it (a selection, today nothing) is
+    // not taken away by this.
+    const touchHost = terminalRef.current;
+    const panTracker = createTouchPanTracker();
+    const onTouchPanDown = (ev: PointerEvent) => {
+      if (ev.pointerType !== 'touch') return;
+      panTracker.down(ev.pointerId, ev.clientX, ev.clientY);
+    };
+    const onTouchPanMove = (ev: PointerEvent) => {
+      if (ev.pointerType !== 'touch') return;
+      const deltaY = panTracker.move(ev.pointerId, ev.clientX, ev.clientY);
+      if (!panTracker.panning) return;
+      ev.preventDefault();
+      if (deltaY === 0) return;
+      // markTouchWheel: a finger and a detent disagree about how many app-level
+      // reports one line is worth, and only the dispatcher knows which this is
+      // (#245). Everything else about the event is deliberately identical.
+      touchHost.dispatchEvent(markTouchWheel(new WheelEvent('wheel', {
+        deltaY,
+        deltaMode: 0, // DOM_DELTA_PIXEL — wheelDeltaToLines owns the cell maths
+        clientX: ev.clientX,
+        clientY: ev.clientY,
+        bubbles: true,
+        cancelable: true,
+      })));
+    };
+    const onTouchPanEnd = (ev: PointerEvent) => {
+      if (ev.pointerType !== 'touch') return;
+      panTracker.up(ev.pointerId);
+    };
+    touchHost.addEventListener('pointerdown', onTouchPanDown, { passive: true });
+    touchHost.addEventListener('pointermove', onTouchPanMove, { passive: false });
+    touchHost.addEventListener('pointerup', onTouchPanEnd, { passive: true });
+    // pointercancel fires when the platform takes the gesture over (a system
+    // edge swipe, the pointer leaving the window). Without it the tracker keeps
+    // a finger down forever and the NEXT one is read as a second contact and
+    // rejected — the feature would work exactly once.
+    touchHost.addEventListener('pointercancel', onTouchPanEnd, { passive: true });
+    cleanupFnsRef.current.push(() => {
+      touchHost.removeEventListener('pointerdown', onTouchPanDown);
+      touchHost.removeEventListener('pointermove', onTouchPanMove);
+      touchHost.removeEventListener('pointerup', onTouchPanEnd);
+      touchHost.removeEventListener('pointercancel', onTouchPanEnd);
+      panTracker.reset();
     });
 
 
@@ -946,7 +1236,7 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
       // (issue #146). Routed through terminal.input (→ onData) rather than
       // pty.write so broadcast-input fans a remapped key out like any other.
       if (applyKeyRemap(event, (data) => terminal.input(data, true))) return false;
-      if (event.type === 'keydown' && event.ctrlKey && event.key === 'c') {
+      if (event.type === 'keydown' && event.ctrlKey && isLetterKey(event, 'c', 'KeyC')) {
         // ConPTY pads lines to full width with real spaces — trim them or
         // pasted blocks carry ragged trailing whitespace (issue #102).
         const selection = trimTrailingWhitespace(terminal.getSelection());
@@ -957,7 +1247,7 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
         }
       }
       // Ctrl+V: main reads the clipboard and tells us what to type.
-      if (event.type === 'keydown' && event.ctrlKey && event.key === 'v') {
+      if (event.type === 'keydown' && event.ctrlKey && isLetterKey(event, 'v', 'KeyV')) {
         // Prevent the browser 'paste' event — without this, xterm's built-in
         // paste handler ALSO writes the clipboard content through onData,
         // causing the text to appear twice in the terminal.
@@ -975,6 +1265,31 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
       // like any other key.
       if (isShiftEnter(event)) {
         return handleShiftEnter(event, (data) => terminal.input(data, true));
+      }
+      // Let wmux's own shortcuts escape the terminal.
+      //
+      // Every global binding lives on a document-level keydown listener
+      // (App.tsx's palette, useKeyboardShortcuts, PaneWrapper's find). xterm's
+      // _keyDown ends a handled key with cancel(event, true) — preventDefault
+      // AND stopPropagation — and it "handles" every bare Ctrl+<letter> by
+      // turning it into a control code (Ctrl+N -> ). So the event died at
+      // the helper textarea and none of those listeners ever ran: Ctrl+N, +T,
+      // +W, +D and +F did nothing while a terminal had focus, and appeared to
+      // start working only once focus had moved off it — e.g. right after
+      // opening the command palette, whose Ctrl+Shift+P xterm does not claim.
+      //
+      // Returning false makes _keyDown bail BEFORE cancel(), so the keystroke
+      // stays alive and bubbles to document, where the real handler runs and
+      // does its own preventDefault (which also suppresses the keypress).
+      //
+      // Placed last on purpose: config.toml remaps (#146), Ctrl+C copy, Ctrl+V
+      // paste and Shift+Enter (#119) are terminal-owned and keep precedence.
+      // claimsKeyEvent is the same predicate the document listener uses to
+      // decide it will act, so a key can never be released here only to be
+      // declined there.
+      if (event.type === 'keydown') {
+        const { shortcuts, keyboardPrefs } = useStore.getState();
+        if (claimsKeyEvent(event, shortcuts, keyboardPrefs)) return false;
       }
       return true;
     });
@@ -1044,6 +1359,14 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
         // emulator have to be cleared together or a remount re-asserts the
         // modes we just dropped.
         surfaceMouseModes.delete(id);
+        // The wheel accumulator is keyed the same way and has the same
+        // unbounded-growth problem, so it is dropped on the same path rather
+        // than only on `wmux:reset-terminal` — a surface that dies without
+        // ever being reset would otherwise leave its remainder behind for the
+        // life of the process. Dropping it is also correct on its own terms:
+        // a fraction of a line owed to a scroll gesture aimed at a dead
+        // process should not be paid out to whatever opens here next.
+        wheelLineAccum.delete(id);
         // A dead process cannot produce the output an anchor is holding back,
         // so holding the viewport off the bottom would hide the "[process
         // exited]" line this handler just wrote — the one thing the user most
@@ -1055,12 +1378,12 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
       cleanupFnsRef.current.push(unsubData, unsubExit);
 
       // Flush any resize that arrived before this PTY was ready
-      if (pendingResizeDims) {
+      if (pendingResizeDims && !replayHold.isHolding) {
         window.wmux.pty.resize(id, pendingResizeDims.cols, pendingResizeDims.rows);
         pendingResizeDims = null;
       } else {
         // Initial resize, retried until the renderer has laid out (see helper).
-        scheduleInitialResize(id, fit, fitAddon, ptyIdRef);
+        scheduleInitialResize(id, fit, fitAddon, ptyIdRef, replayHold);
       }
 
       // Deferred visual safety-net (see scheduleDeferredRepaint).
@@ -1180,7 +1503,7 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
       resizeRaf = requestAnimationFrame(() => {
         resizeRaf = null;
         fit();
-        const dims = fitAddon.proposeDimensions();
+        const dims = replayHoldRef.current.isHolding ? null : fitAddon.proposeDimensions();
         if (dims) {
           if (ptyIdRef.current) {
             window.wmux.pty.resize(ptyIdRef.current, dims.cols, dims.rows);
@@ -1239,7 +1562,7 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
 
       // Snapshot the buffer before disposal so a remount can replay it
       // (see snapshotSurfaceBuffer).
-      snapshotSurfaceBuffer(surfaceId, serializeAddon);
+      snapshotSurfaceBuffer(surfaceId, serializeAddon, terminal);
 
       // Drop the read-screen registry entry — but only if it still points at
       // THIS terminal (StrictMode re-setup may already have registered the
@@ -1328,7 +1651,10 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
       resetTerminalModes(term);
       // Drop the replay cache too, or the next remount puts the modes straight
       // back — same coupling as the exit path.
-      if (surfaceId) surfaceMouseModes.delete(surfaceId);
+      if (surfaceId) {
+        surfaceMouseModes.delete(surfaceId);
+        wheelLineAccum.delete(surfaceId);
+      }
     };
     document.addEventListener('wmux:reset-terminal', handler);
     return () => document.removeEventListener('wmux:reset-terminal', handler);
@@ -1408,7 +1734,7 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
       raf = requestAnimationFrame(() => {
         if (!xtermRef.current) return;
         fit();
-        const dims = fitAddonRef.current?.proposeDimensions();
+        const dims = replayHoldRef.current.isHolding ? null : fitAddonRef.current?.proposeDimensions();
         if (dims && ptyIdRef.current) {
           window.wmux.pty.resize(ptyIdRef.current, dims.cols, dims.rows);
         }
@@ -1448,7 +1774,7 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
           // The terminal may have been disposed between scheduling and firing.
           if (!xtermRef.current) return;
           fit();
-          const dims = fitAddonRef.current?.proposeDimensions();
+          const dims = replayHoldRef.current.isHolding ? null : fitAddonRef.current?.proposeDimensions();
           if (dims && ptyIdRef.current) {
             window.wmux.pty.resize(ptyIdRef.current, dims.cols, dims.rows);
           }

@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import * as os from 'os';
-import { IPC_CHANNELS, type InsertionResult } from '../shared/types';
+import { IPC_CHANNELS, type InsertionResult, type UpdateTriggerResult } from '../shared/types';
 
 contextBridge.exposeInMainWorld('wmux', {
   pty: {
@@ -35,12 +35,26 @@ contextBridge.exposeInMainWorld('wmux', {
     // rather than an IPC round-trip because the markdown path chip (issue #116)
     // needs it during render to shorten `C:\Users\me\notes.md` → `~\notes.md`.
     homeDir: os.homedir(),
+    // `os.release()` verbatim (e.g. '10.0.26200'), read once at preload time.
+    // The renderer needs the Windows build number to hand xterm its ConPTY
+    // compatibility block at Terminal-construction time — an async IPC answer
+    // would arrive after the terminal already existed. See utils/windows-pty.ts.
+    osRelease: os.release(),
     getShells: () => ipcRenderer.invoke(IPC_CHANNELS.SYSTEM_GET_SHELLS),
     getFonts: () => ipcRenderer.invoke(IPC_CHANNELS.SYSTEM_GET_FONTS) as Promise<string[]>,
     openExternal: (url: string) => ipcRenderer.send(IPC_CHANNELS.SYSTEM_OPEN_EXTERNAL, url),
     getVersion: () => ipcRenderer.invoke(IPC_CHANNELS.SYSTEM_GET_VERSION),
     toggleDevTools: () => ipcRenderer.send('toggle-devtools'),
     pickFolder: () => ipcRenderer.invoke(IPC_CHANNELS.SYSTEM_PICK_FOLDER),
+    // Restart Explorer with its icon cache cleared (issues #137/#226). Main
+    // puts up the confirm itself — the dialog names the cost (File Explorer
+    // windows close) and the renderer cannot be trusted to have said it.
+    refreshIconCache: (): Promise<{ ran: boolean }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SYSTEM_REFRESH_ICON_CACHE),
+    // True exactly once per process, on the first launch after an update that
+    // changed the app icon — the renderer turns it into a bell notification.
+    takeIconChangeNotice: (): Promise<boolean> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SYSTEM_TAKE_ICON_CHANGE_NOTICE),
     getContextMenu: () => ipcRenderer.invoke(IPC_CHANNELS.SYSTEM_GET_CONTEXT_MENU) as Promise<boolean>,
     setContextMenu: (enabled: boolean, label?: string) =>
       ipcRenderer.invoke(IPC_CHANNELS.SYSTEM_SET_CONTEXT_MENU, enabled, label) as Promise<{
@@ -227,15 +241,28 @@ contextBridge.exposeInMainWorld('wmux', {
       return () => ipcRenderer.removeListener(IPC_CHANNELS.UPDATE_AVAILABLE, handler);
     },
     // Issue #125 — download and install without leaving the app. Resolves
-    // { handled: false } when this build can't self-update, which is the
-    // renderer's cue to fall back to openRelease().
-    install: (): Promise<{ handled: boolean; reason?: string }> =>
+    // `handled: false` when this build can't self-update, which is the
+    // renderer's cue to fall back to openRelease() — with `url` when main knows
+    // which page that is. The shape is the shared UpdateTriggerResult so this
+    // bridge cannot go on under-declaring what main returns.
+    install: (): Promise<UpdateTriggerResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.UPDATE_INSTALL),
     getState: () => ipcRenderer.invoke(IPC_CHANNELS.UPDATE_GET_STATE),
     onState: (callback: (state: { phase: string; version: string | null; percent: number; message?: string }) => void) => {
       const handler = (_event: any, state: any) => callback(state);
       ipcRenderer.on(IPC_CHANNELS.UPDATE_STATE, handler);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.UPDATE_STATE, handler);
+    },
+  },
+  // GPU watchdog (issue #229): the renderer only REPORTS that frames have
+  // stopped; main decides (focus + OS idle time) and does the restart.
+  gpu: {
+    reportStall: (report: { missed: number; stalledForMs: number }) =>
+      ipcRenderer.send(IPC_CHANNELS.GPU_STALL, report),
+    onRestarted: (callback: (info: { stalledForMs: number }) => void) => {
+      const handler = (_event: any, info: any) => callback(info);
+      ipcRenderer.on(IPC_CHANNELS.GPU_RESTARTED, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.GPU_RESTARTED, handler);
     },
   },
   hook: {

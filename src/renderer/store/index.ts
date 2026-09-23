@@ -9,8 +9,9 @@ import { ProgressSlice, createProgressSlice } from './progress-slice';
 import { AgentStateSlice, createAgentStateSlice } from './agent-state-slice';
 import { PromptSlice, createPromptSlice } from './prompt-slice';
 import { QuotaSlice, createQuotaSlice } from './quota-slice';
+import { OscTitleSlice, createOscTitleSlice } from './osc-title-slice';
 
-export type WmuxStore = WorkspaceSlice & SettingsSlice & NotificationSlice & SurfaceSlice & AgentSlice & OrchestrationSlice & ProgressSlice & AgentStateSlice & PromptSlice & QuotaSlice;
+export type WmuxStore = WorkspaceSlice & SettingsSlice & NotificationSlice & SurfaceSlice & AgentSlice & OrchestrationSlice & ProgressSlice & AgentStateSlice & PromptSlice & QuotaSlice & OscTitleSlice;
 
 export const useStore = create<WmuxStore>()((...args) => ({
   ...createWorkspaceSlice(...args),
@@ -23,4 +24,5 @@ export const useStore = create<WmuxStore>()((...args) => ({
   ...createAgentStateSlice(...args),
   ...createPromptSlice(...args),
   ...createQuotaSlice(...args),
+  ...createOscTitleSlice(...args),
 }));

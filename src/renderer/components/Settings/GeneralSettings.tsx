@@ -58,6 +58,19 @@ export default function GeneralSettings() {
   const [contextMenu, setContextMenu] = useState(false);
   const [contextMenuBusy, setContextMenuBusy] = useState(false);
   const [contextMenuError, setContextMenuError] = useState(false);
+  // Explorer restart for the icon cache (issues #137/#226). Main owns the
+  // confirm; "busy" only covers the moment the dialog is up plus a beat after,
+  // so a double-click cannot queue two restarts.
+  const [iconCacheBusy, setIconCacheBusy] = useState(false);
+  const refreshIconCache = async () => {
+    setIconCacheBusy(true);
+    try {
+      const result = await window.wmux?.system?.refreshIconCache?.();
+      if (result?.ran) await new Promise((r) => setTimeout(r, 3000));
+    } finally {
+      setIconCacheBusy(false);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -177,6 +190,18 @@ export default function GeneralSettings() {
       <p className="settings-hint">
         {contextMenuError ? t('settings.general.contextMenuFailed') : t('settings.general.contextMenuHint')}
       </p>
+
+      <div className="settings-row">
+        <label className="settings-label">{t('settings.general.iconCache')}</label>
+        <button
+          className="settings-button"
+          disabled={iconCacheBusy}
+          onClick={() => { void refreshIconCache(); }}
+        >
+          {iconCacheBusy ? t('settings.general.iconCacheStarted') : t('settings.general.iconCacheButton')}
+        </button>
+      </div>
+      <p className="settings-hint">{t('settings.general.iconCacheHint')}</p>
 
       <h3 className="settings-section-title">{t('settings.general.customBgSection')}</h3>
 

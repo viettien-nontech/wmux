@@ -42,6 +42,18 @@ export const en = {
   'settings.general.contextMenuHint':
     'Right-click a folder — or its empty space — to open it as a workspace, instead of pasting the path. On Windows 11 it appears under "Show more options" (Shift+F10); the modern top-level menu requires a signed MSIX package. Writes only to HKCU, so no admin rights are needed.',
   'settings.general.contextMenuFailed': 'Could not update the context menu entry.',
+  // Settings — General panel — Windows icon cache (issues #137/#226)
+  'settings.general.iconCache': 'Taskbar still showing the old wmux icon?',
+  'settings.general.iconCacheButton': 'Refresh taskbar icons',
+  'settings.general.iconCacheStarted': 'Explorer is restarting…',
+  'settings.general.iconCacheHint':
+    'Windows caches shell icons and only re-reads them when Explorer restarts, so after an update that changed the icon, the taskbar and a pinned button can keep drawing the old one while the window and notifications already show the new one. This restarts Explorer with that cache cleared: the taskbar disappears for a second and any open File Explorer windows close. Your terminals are not affected.',
+  'notification.iconChanged.title': 'wmux has a new icon',
+  'notification.iconChanged.text':
+    'If the taskbar or a pinned button still shows the old one, use Settings → General → Refresh taskbar icons.',
+  'notification.gpuRestarted.title': 'wmux restarted its graphics process',
+  'notification.gpuRestarted.text':
+    'The window had stopped painting while you were using it. Terminals and agents were not affected.',
   // Settings — General panel — Custom background (issue #89)
   'settings.general.customBgSection': 'Custom background',
   'settings.general.customBgEnable': 'Enable custom background',
@@ -267,6 +279,10 @@ export const en = {
   // it controls reviews a pair of git repositories, not a pane.
   'chuV.label': 'Review with a second AI',
   'chuV.off': 'off',
+  'sidebar.newWorkspaceFromLayout': 'New workspace from layout…',
+  'sidebar.layoutMenu.empty': 'No saved layouts yet',
+  'sidebar.layoutMenu.untitled': 'Untitled layout',
+  'sidebar.layoutMenu.manage': 'Manage layouts…',
   // Sidebar — session menu (save/load)
   'sessionMenu.justNow': 'just now',
   'sessionMenu.minutesAgo': '{count}m ago',
@@ -287,6 +303,9 @@ export const en = {
   'settings.browser.defaultUrl': 'Start page',
   'settings.browser.defaultUrlHint':
     'Where a workspace\'s browser panel opens before it has been anywhere. Needs a scheme (http:// or https://). Leave empty for wmux\'s own page. Also settable in ~/.wmux/config.toml as [browser] default-url.',
+  'settings.browser.autoOpenDevServer': 'Auto-open dev servers in the browser panel',
+  'settings.browser.autoOpenDevServerHint':
+    'When on, the browser panel navigates to a dev server (Vite, Next, …) on its own the moment one starts. On by default — turn it off and detected ports are still shown on the workspace row, but nothing opens without you. Also settable in ~/.wmux/config.toml as [browser] auto-open.',
   'settings.browser.linksSection': 'Links',
   'settings.browser.openLinksExternally': 'Open links in the system browser',
   'settings.browser.openLinksExternallyHint': 'Clicked links in terminals and markdown go to your default browser instead of the wmux panel. Ctrl+click always does the opposite.',
@@ -518,6 +537,10 @@ export const en = {
   'settings.terminalPanel.cursorStyle.underline': 'Underline',
   'settings.terminalPanel.cursorStyle.bar': 'Bar',
   'settings.terminalPanel.cursorBlink': 'Cursor blink',
+  'settings.terminalPanel.tabsSection': 'Tabs',
+  'settings.terminalPanel.oscTitleTabs': 'Use the window title as the tab label',
+  'settings.terminalPanel.oscTitleTabsHint':
+    'Label a terminal tab with the window title its program sets — Claude Code announces the conversation title this way. A tab you renamed yourself always keeps its name. Turn this off if your shell sets the title to its full path.',
   'settings.terminalPanel.scrollbackSection': 'Scrollback',
   'settings.terminalPanel.scrollbackLines': 'Scrollback lines',
   'settings.terminalPanel.bg': 'bg',
@@ -534,6 +557,18 @@ export const en = {
   'settings.workspacePanel.confirmClose': 'Confirm before closing a session',
   'settings.workspacePanel.confirmCloseHint':
     "Ask before the × button, the context menu or Ctrl+Shift+W closes a session — a stray click can't take down agents that haven't saved their state yet. Closes from the CLI and agents never prompt.",
+  'settings.workspacePanel.confirmAppClose': 'Confirm before closing wmux',
+  'settings.workspacePanel.confirmAppCloseHint':
+    "Ask before the window's × button or Alt+F4 quits wmux — closing the window ends every terminal session in it, agents included. Updates, restarts and Windows shutdown never prompt.",
+  'settings.workspacePanel.sessionSnapshot': 'Snapshot sessions every',
+  'settings.workspacePanel.sessionSnapshotOff': 'Never',
+  'settings.workspacePanel.sessionSnapshot5': '5 minutes',
+  'settings.workspacePanel.sessionSnapshot10': '10 minutes',
+  'settings.workspacePanel.sessionSnapshot15': '15 minutes',
+  'settings.workspacePanel.sessionSnapshot30': '30 minutes',
+  'settings.workspacePanel.sessionSnapshot60': '60 minutes',
+  'settings.workspacePanel.sessionSnapshotHint':
+    'Keeps the last three layouts that were different, as "Auto-save …" entries under Load session — so a pane closed by mistake, or by an agent, can be brought back. Only a layout that actually changed uses a slot, so an idle machine keeps its history.',
   'settings.workspacePanel.restoreClaudeSessions': 'Resume Claude Code sessions on restore',
   'settings.workspacePanel.restoreClaudeSessionsHint': 'When wmux restores a session, re-launch each terminal that was running Claude Code with `claude --resume`, in the directory it was in. Off by default: every such pane starts an agent at once. Panes whose conversation Claude no longer has are skipped, and a Claude you exited cleanly is not resumed.',
   'settings.workspacePanel.autoOpenDiff': 'Auto-open diff tab on agent edits',
@@ -653,6 +688,10 @@ export const en = {
   'addressBar.engineAgentTitle': 'Hand this tab to a real Chrome outside wmux, and watch what your agent does to it here. Needs a one-time install.',
   'addressBar.backAgent': 'History is not available while the agent drives the browser',
   'addressBar.reloadViewer': 'Reload the activity viewer (does not reload the page the agent is on)',
+  // A browser surface with no page yet (#232). wmux used to answer this with its
+  // own GitHub repo, which it then remembered as if the user had chosen it.
+  'browser.blank.title': 'No page open',
+  'browser.blank.hint': 'Type a URL above, or set a start page in Settings → Browser.',
   'agentBrowser.setupTitle': 'Let your agent drive a real Chrome',
   'agentBrowser.setupBody': 'agent-browser gives this tab a real Chrome instead of the built-in panel: real profiles, real extensions, sites that refuse an embedded browser. You watch a live viewport and a chronological feed of every command your agent runs.',
   'agentBrowser.setupCost': 'One-time download of about 240 MB (the tool plus its own Chrome).',
@@ -699,8 +738,6 @@ export const en = {
   'app.claudeNeedsInput': 'Claude Code needs your input',
   'app.claudeFinishedIn': 'Claude Code finished in {workspace}',
   'app.claudeFinished': 'Claude Code finished',
-  'app.firstSessionTitle': 'Session 1',
-  'app.sessionTitle': 'Session {n}',
   'app.sessionSaved': 'Session "{name}" saved',
   'app.expandSidebar': 'Expand sidebar (Ctrl+B)',
   'app.closeBrowserPanel': 'Close browser panel',
@@ -721,7 +758,7 @@ export const en = {
   'surfaceTab.profileBadge': 'project',
   // Settings — agent integration consent (issue #132)
   'settings.integration.section': 'Agent integration',
-  'settings.integration.enable': 'Let wmux configure Claude Code, OpenCode and Kiro',
+  'settings.integration.enable': 'Let wmux configure Claude Code, OpenCode, Kiro, omp and pi',
   'settings.integration.hint':
     'wmux edits files in your home directory so coding agents can drive its browser panel, markdown views and sidebar status. Turning something off here also removes what it wrote.',
   'settings.integration.instructions': 'Agent instructions',

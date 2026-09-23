@@ -650,9 +650,17 @@ export const IPC_CHANNELS = {
   SYSTEM_GET_CONTEXT_MENU: 'system:getContextMenu',
   SYSTEM_SET_CONTEXT_MENU: 'system:setContextMenu',
   SYSTEM_GET_SHOULD_USE_DARK_COLORS: 'system:getShouldUseDarkColors',
+  // Windows shell icon cache (issues #137/#226): the Explorer restart behind a
+  // native confirm, and the once-per-update "your taskbar may lag" notice.
+  SYSTEM_REFRESH_ICON_CACHE: 'system:refreshIconCache',
+  SYSTEM_TAKE_ICON_CHANGE_NOTICE: 'system:takeIconChangeNotice',
   SYSTEM_NATIVE_THEME_UPDATED: 'system:nativeThemeUpdated',
   // Metadata events (main → renderer)
   METADATA_UPDATE: 'metadata:update',
+  // GPU watchdog (issue #229). Renderer → main: "no frame for N s while
+  // visible"; main → renderer: "the GPU process was restarted" (a bell notice).
+  GPU_STALL: 'gpu:stall',
+  GPU_RESTARTED: 'gpu:restarted',
   // Agent
   AGENT_SPAWN: 'agent:spawn',
   AGENT_SPAWN_BATCH: 'agent:spawn-batch',
@@ -787,6 +795,24 @@ export const IPC_CHANNELS = {
   UPDATE_GET_STATE: 'update:get-state',
   UPDATE_STATE: 'update:state',
 } as const;
+
+/**
+ * What UPDATE_INSTALL answers — one declaration for all three sides of that
+ * channel, because it had already drifted: main learned to return `url` and the
+ * preload bridge still declared `{ handled, reason }`, so the only thing a
+ * typed renderer could see the release page through was its own local copy of
+ * this shape. A consumer that trusted the bridge's type would have dropped the
+ * fallback URL silently.
+ *
+ * `handled: false` is the caller's cue to open the release page itself; `url`
+ * is set when main knows which one, since the renderer's cached release info
+ * comes from the notify-only poller and may not have arrived yet.
+ */
+export interface UpdateTriggerResult {
+  handled: boolean;
+  reason?: string;
+  url?: string;
+}
 
 // ─── Orchestration state (wmux-orchestrator plugin) ────────────────────────
 // Mirrors the shape written by the plugin into {TMPDIR}/wmux-orch-*/state.json.

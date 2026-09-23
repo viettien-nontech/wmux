@@ -147,3 +147,65 @@ describe('reconcileIndexModifiers', () => {
       .toEqual({ workspace: 'ctrl', surface: 'off' });
   });
 });
+
+
+// ─── Unknown modifier values must degrade, never throw ───────────────────────
+// Reading `.ctrl` off `MODIFIER_TRIPLE[<unknown>]` threw "Cannot read
+// properties of undefined (reading 'ctrl')" and, because the F1 cheat sheet
+// builds its rows through formatIndexShortcut, took the entire renderer down
+// via the root ErrorBoundary. matchIndexShortcut has the same shape and runs on
+// every keydown, which is the worse of the two.
+describe('unknown IndexModifiers values', () => {
+  const junk = ['ctrl-shift-alt', '', 'CTRL', undefined, null] as unknown as IndexModifiers[];
+
+  it('formatIndexShortcut returns null instead of throwing', () => {
+    for (const bad of junk) {
+      expect(() => formatIndexShortcut(bad)).not.toThrow();
+      expect(formatIndexShortcut(bad)).toBeNull();
+    }
+  });
+
+  it('matchIndexShortcut returns null instead of throwing', () => {
+    const e = { key: '3', code: 'Digit3', ctrlKey: true, altKey: false, shiftKey: false };
+    for (const bad of junk) {
+      expect(() => matchIndexShortcut(e, bad)).not.toThrow();
+      expect(matchIndexShortcut(e, bad)).toBeNull();
+    }
+  });
+});
+
+
+// ─── The partial-patch clobber (the real cause of the 'ctrl' crash) ──────────
+// reconcileIndexModifiers used `{ ...prev, ...patch }`. applyIndexModifiers
+// always passes BOTH keys, so the untouched family arrived as an explicit
+// `undefined` and the spread wrote it over prev's good value. Changing one
+// dropdown in Settings -> Keyboard thus set the OTHER family to undefined, and
+// every subsequent keydown threw in matchIndexShortcut.
+describe('reconcileIndexModifiers with an explicit-undefined patch', () => {
+  it('keeps the untouched family instead of clobbering it', () => {
+    const prev = { workspace: 'ctrl', surface: 'ctrl-alt' } as const;
+    const out = reconcileIndexModifiers(prev, { workspace: 'alt', surface: undefined });
+    expect(out.surface).toBe('ctrl-alt');
+    expect(out.workspace).toBe('alt');
+  });
+
+  it('never yields undefined for either family', () => {
+    const prev = { workspace: 'ctrl', surface: 'ctrl-alt' } as const;
+    for (const patch of [
+      { workspace: 'alt' as const, surface: undefined },
+      { workspace: undefined, surface: 'alt' as const },
+      { workspace: undefined, surface: undefined },
+    ]) {
+      const out = reconcileIndexModifiers(prev, patch);
+      expect(out.workspace).toBeDefined();
+      expect(out.surface).toBeDefined();
+    }
+  });
+
+  it('still swaps on a collision (the rule this function exists for)', () => {
+    const prev = { workspace: 'ctrl', surface: 'ctrl-alt' } as const;
+    const out = reconcileIndexModifiers(prev, { workspace: 'ctrl-alt', surface: undefined });
+    expect(out.workspace).toBe('ctrl-alt');
+    expect(out.surface).toBe('ctrl'); // handed back the workspace's old combo
+  });
+});

@@ -229,6 +229,47 @@ export default function WorkspaceSettings() {
       </p>
 
       <div className="settings-row">
+        <label className="settings-label">{t('settings.workspacePanel.confirmAppClose', 'Confirm before closing wmux')}</label>
+        <input
+          type="checkbox"
+          className="settings-toggle"
+          checked={workspacePrefs.confirmAppClose}
+          onChange={(e) => setWorkspacePrefs({ confirmAppClose: e.target.checked })}
+        />
+      </div>
+      <p className="settings-hint">
+        {t(
+          'settings.workspacePanel.confirmAppCloseHint',
+          "Ask before the window's × button or Alt+F4 quits wmux — closing the window ends every terminal session in it, agents included. Updates, restarts and Windows shutdown never prompt.",
+        )}
+      </p>
+
+      <div className="settings-row">
+        <label className="settings-label" htmlFor="session-snapshot-minutes">
+          {t('settings.workspacePanel.sessionSnapshot', 'Snapshot sessions every')}
+        </label>
+        <select
+          id="session-snapshot-minutes"
+          className="settings-select"
+          value={String(workspacePrefs.sessionSnapshotMinutes)}
+          onChange={(e) => setWorkspacePrefs({ sessionSnapshotMinutes: Number(e.target.value) })}
+        >
+          <option value="0">{t('settings.workspacePanel.sessionSnapshotOff', 'Never')}</option>
+          <option value="5">{t('settings.workspacePanel.sessionSnapshot5', '5 minutes')}</option>
+          <option value="10">{t('settings.workspacePanel.sessionSnapshot10', '10 minutes')}</option>
+          <option value="15">{t('settings.workspacePanel.sessionSnapshot15', '15 minutes')}</option>
+          <option value="30">{t('settings.workspacePanel.sessionSnapshot30', '30 minutes')}</option>
+          <option value="60">{t('settings.workspacePanel.sessionSnapshot60', '60 minutes')}</option>
+        </select>
+      </div>
+      <p className="settings-hint">
+        {t(
+          'settings.workspacePanel.sessionSnapshotHint',
+          'Keeps the last three layouts that were different, as "Auto-save …" entries under Load session — so a pane closed by mistake, or by an agent, can be brought back. Only a layout that actually changed uses a slot, so an idle machine keeps its history.',
+        )}
+      </p>
+
+      <div className="settings-row">
         <label className="settings-label">{t('settings.workspacePanel.restoreClaudeSessions', 'Resume Claude Code sessions on restore')}</label>
         <input
           type="checkbox"

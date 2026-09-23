@@ -372,6 +372,16 @@ export interface WorkspacePrefs {
    */
   confirmWorkspaceClose: boolean;
   /**
+   * Ask before the WINDOW closes (issue #227): the caption ×, Alt+F4 or the
+   * closeWindow shortcut ends every PTY in the window, agents included, and
+   * on a loaded machine the click is not even aimed. Opt-in like the one
+   * above. Decided in MAIN (`close-guard.ts`), which reads this off
+   * settings.json at close time — the renderer may be the unresponsive part.
+   * Programmatic quits (update install, relaunch, Windows shutdown) and
+   * `wmux close-window` never prompt.
+   */
+  confirmAppClose: boolean;
+  /**
    * Read agent TUIs off the screen to infer blocked/working/idle for agents
    * that do not report state themselves (Codex, Gemini, Aider, …).
    *
@@ -429,6 +439,22 @@ export interface WorkspacePrefs {
    */
   newWorkspacePanes: number;
   newWorkspaceLayout: WorkspaceLayout;
+  /**
+   * How often the live layout is snapshotted as a named session, in minutes;
+   * `0` switches it off (issue #238).
+   *
+   * `session.json` is rewritten in place every 30 seconds, so it only ever
+   * holds the current state — right for restore-on-launch, useless after a
+   * mistake. The reporter lost 28 browser panes to a cleanup script and got
+   * most of them back only because an OLDER file happened to survive.
+   *
+   * Read in MAIN, off settings.json, at save time (`index.ts`), which is why
+   * it is a number of minutes rather than a computed interval: main must be
+   * able to make sense of whatever is in the file, including a hand-edited one.
+   * Snapshots go into a three-slot ring of `Auto-save …` sessions, and only a
+   * layout that actually CHANGED spends a slot.
+   */
+  sessionSnapshotMinutes: number;
 }
 
 export const DEFAULT_WORKSPACE_PREFS: WorkspacePrefs = {
@@ -439,11 +465,15 @@ export const DEFAULT_WORKSPACE_PREFS: WorkspacePrefs = {
   showWelcomeScreen: true,
   autoOpenDiffTab: true,
   confirmWorkspaceClose: false,
+  confirmAppClose: false,
   defaultLayoutId: null,
   restoreClaudeSessions: false,
   detectAgentScreens: true,
   newWorkspacePanes: 3,
   newWorkspaceLayout: 'grid',
+  // On by default, unlike the two confirmation guards above: those change what
+  // a click does, and this only writes a file the user never has to look at.
+  sessionSnapshotMinutes: 5,
 };
 
 // ─── Terminal settings ────────────────────────────────────────────────────────
@@ -471,6 +501,21 @@ export interface TerminalPrefs {
   cursorStyle: 'block' | 'underline' | 'bar';
   cursorBlink: boolean;
   scrollbackLines: number;
+  /**
+   * Label a terminal tab with the OSC 0/2 window title its program set, when
+   * the tab has no name of its own (issue #221).
+   *
+   * On by default, as in Windows Terminal: with six panes open in one repo,
+   * every tab otherwise reads the same, and Claude Code has been announcing its
+   * conversation title as OSC 2 all along. Off returns every tab to the cwd
+   * basename — worth having for a shell whose profile sets the title to the
+   * full path, which Git for Windows does.
+   *
+   * A NEW pref field, so it needs no `promptDefaultRev`-style promotion: prefs
+   * persist as whole blocks and `{...DEFAULTS, ...stored}` fills an absent key
+   * in. Only CHANGING this default later would reach nobody.
+   */
+  oscTitleTabs: boolean;
   /** User-defined color schemes, addressable by name in per-pane overrides. */
   userColorSchemes: Record<string, UserColorScheme>;
 }
@@ -482,6 +527,7 @@ export const DEFAULT_TERMINAL_PREFS: TerminalPrefs = {
   cursorStyle: 'block',
   cursorBlink: true,
   scrollbackLines: 5000,
+  oscTitleTabs: true,
   userColorSchemes: {},
 };
 
@@ -555,6 +601,25 @@ export interface BrowserPrefs {
    * clothes.
    */
   defaultUrl: string;
+  /**
+   * Automatically navigate the workspace's browser panel to a dev server the
+   * moment one is detected on a known port (Vite 5173, Next 3000, …).
+   *
+   * Default TRUE, and not for the reason the shape of the pref suggests. A
+   * panel navigating on its own with no click does read as the app acting
+   * behind the user's back — but this behaviour PREDATES the pref, so the
+   * default is not picking a policy for a new feature, it is picking whether
+   * to REVOKE one every existing install already has. Same argument as
+   * `openLinksExternally` above. Prefs persist as whole blocks and a NEW
+   * field is filled from DEFAULTS (`{...DEFAULTS, ...stored}`), which is what
+   * makes this free mechanically and expensive socially: defaulting false
+   * switches it off for everyone on upgrade, silently, with no note attached
+   * — which is how a pref meant to give people a choice ends up taking one
+   * away. Turn it off here or via `~/.wmux/config.toml` `[browser]
+   * auto-open`. Detected ports are tracked and shown either way; this governs
+   * only the unprompted navigation.
+   */
+  autoOpenDevServer: boolean;
 }
 
 export const DEFAULT_BROWSER_PREFS: BrowserPrefs = {
@@ -563,6 +628,7 @@ export const DEFAULT_BROWSER_PREFS: BrowserPrefs = {
   openOnStartup: true,
   openLinksExternally: false,
   defaultUrl: '',
+  autoOpenDevServer: true,
 };
 
 // ─── Prompt settings (issue #207) ─────────────────────────────────────────────
@@ -822,15 +888,36 @@ function coerceIndexModifiers(value: unknown, fallback: IndexModifiers): IndexMo
  * The one place a `KeyboardPrefs` value is produced. Translates between the
  * pref field names and the family names `reconcileIndexModifiers` speaks, so
  * the collision rule itself stays a pure, testable function.
+ *
+ * Exported for the unit suite: it is the chokepoint both the load path and
+ * setKeyboardPrefs funnel through, so it is where the "no unknown value ever
+ * reaches the store" invariant is worth pinning directly.
  */
-function applyIndexModifiers(base: KeyboardPrefs, patch: Partial<KeyboardPrefs>): KeyboardPrefs {
-  const next = reconcileIndexModifiers(
-    { workspace: base.workspaceIndexModifiers, surface: base.surfaceIndexModifiers },
-    {
-      workspace: patch.workspaceIndexModifiers,
-      surface: patch.surfaceIndexModifiers,
-    },
-  );
+export function applyIndexModifiers(base: KeyboardPrefs, patch: Partial<KeyboardPrefs>): KeyboardPrefs {
+  // Coerce HERE, not only in loadKeyboardPrefs. setKeyboardPrefs hands this a
+  // caller-supplied patch (the CLI, a settings import) that nothing validates,
+  // so an unknown string used to land in the store verbatim. That made
+  // MODIFIER_TRIPLE[mods] undefined, and reading .ctrl off it threw on EVERY
+  // keydown through matchIndexShortcut -> handleIndexKey, taking the renderer
+  // down via the root ErrorBoundary. Guarding the two readers stops the crash;
+  // guarding here stops the bad value existing at all.
+  //
+  // `base` is coerced too, so a store already holding a bad value heals itself
+  // on the next write instead of staying poisoned for the life of the session.
+  const safeBase = {
+    workspace: coerceIndexModifiers(base.workspaceIndexModifiers, DEFAULT_KEYBOARD_PREFS.workspaceIndexModifiers),
+    surface: coerceIndexModifiers(base.surfaceIndexModifiers, DEFAULT_KEYBOARD_PREFS.surfaceIndexModifiers),
+  };
+  // `undefined` must survive as "the caller did not set this field" — that is
+  // exactly what reconcileIndexModifiers keys its swap rule on — so only a
+  // value that is actually present gets coerced.
+  const coercePatch = (v: IndexModifiers | undefined, fallback: IndexModifiers): IndexModifiers | undefined =>
+    v === undefined ? undefined : coerceIndexModifiers(v, fallback);
+
+  const next = reconcileIndexModifiers(safeBase, {
+    workspace: coercePatch(patch.workspaceIndexModifiers, safeBase.workspace),
+    surface: coercePatch(patch.surfaceIndexModifiers, safeBase.surface),
+  });
   return { workspaceIndexModifiers: next.workspace, surfaceIndexModifiers: next.surface };
 }
 

@@ -45,7 +45,15 @@ export interface IndexKeyEventLike {
 /** Display string for a mode, e.g. `"Ctrl+Alt+1…9"`. `off` renders as `null`. */
 export function formatIndexShortcut(mods: IndexModifiers): string | null {
   if (mods === 'off') return null;
+  // Unknown values must degrade, not throw. `mods` reaches here from the store,
+  // and setKeyboardPrefs -> applyIndexModifiers -> reconcileIndexModifiers
+  // merges its patch WITHOUT running it through coerceIndexModifiers, so a CLI
+  // write or a settings import can seat a value that was never in the union.
+  // Indexing MODIFIER_TRIPLE with one yields undefined, and reading .ctrl off
+  // that took the whole renderer down through the root ErrorBoundary — the F1
+  // cheat-sheet builds its rows here, so one bad string blanked the app.
   const triple = MODIFIER_TRIPLE[mods];
+  if (!triple) return null;
   const parts: string[] = [];
   if (triple.ctrl) parts.push('Ctrl');
   if (triple.alt) parts.push('Alt');
@@ -84,7 +92,11 @@ export function indexDigitFromEvent(e: IndexKeyEventLike): number | null {
  */
 export function matchIndexShortcut(e: IndexKeyEventLike, mods: IndexModifiers): number | null {
   if (mods === 'off') return null;
+  // Same guard as formatIndexShortcut, and it matters more here: this runs on
+  // EVERY keydown, so an unknown value would throw on each keystroke rather
+  // than only when the cheat sheet is opened.
   const triple = MODIFIER_TRIPLE[mods];
+  if (!triple) return null;
   if (e.ctrlKey !== triple.ctrl || e.altKey !== triple.alt || e.shiftKey !== triple.shift) return null;
   return indexDigitFromEvent(e);
 }
@@ -120,7 +132,21 @@ export function reconcileIndexModifiers(
   prev: { workspace: IndexModifiers; surface: IndexModifiers },
   patch: Partial<{ workspace: IndexModifiers; surface: IndexModifiers }>,
 ): { workspace: IndexModifiers; surface: IndexModifiers } {
-  const next = { ...prev, ...patch };
+  // `?? prev` rather than a spread. `{ ...prev, ...patch }` looks equivalent but
+  // is not: applyIndexModifiers always passes BOTH keys, so the family the
+  // caller did not touch arrives as an explicit `undefined` and a spread
+  // overwrites prev's good value with it. Changing one dropdown in Settings ->
+  // Keyboard therefore set the OTHER family to undefined, MODIFIER_TRIPLE
+  // [undefined] is undefined, and matchIndexShortcut read .ctrl off that on
+  // every keydown — blanking the renderer through the root ErrorBoundary.
+  // Nothing bad was ever persisted; the value was manufactured on write.
+  //
+  // The `patch.x !== undefined` checks below still read the raw patch, so
+  // "which field did the caller set" — the swap rule — is unchanged.
+  const next = {
+    workspace: patch.workspace ?? prev.workspace,
+    surface: patch.surface ?? prev.surface,
+  };
   if (next.workspace === 'off' || next.surface === 'off') return next;
   if (next.workspace !== next.surface) return next;
 

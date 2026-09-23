@@ -116,3 +116,46 @@ describe('surface labels', () => {
     ).toBe('My Tab');
   });
 });
+
+describe('window titles as tab labels (issue #221)', () => {
+  it('labels a terminal from the OSC title its program set', () => {
+    expect(
+      getSurfaceLabel(surface('surf-1', { currentCwd: 'C:\\repos\\wmux' }), undefined, undefined, undefined, 'Fix issue #221'),
+    ).toBe('Fix issue #221');
+  });
+
+  it('keeps an explicit rename above the program', () => {
+    // The whole reason the title was captured-but-dropped for so long: a tab's
+    // name is the user's to set, and a program must not take it back.
+    expect(
+      getSurfaceLabel(surface('surf-1', { customTitle: 'API' }), undefined, undefined, undefined, 'Fix issue #221'),
+    ).toBe('API');
+  });
+
+  it('keeps an agent spawn label above the program', () => {
+    // `wmux agent spawn --label reviewer` is the orchestrator naming this
+    // worker, which identifies the pane within a wave better than whatever the
+    // agent's own TUI is announcing this second.
+    expect(
+      getSurfaceLabel(surface('surf-1'), 'reviewer', undefined, undefined, 'Fix issue #221'),
+    ).toBe('reviewer');
+  });
+
+  it('falls back to the cwd when no title has been set', () => {
+    expect(
+      getSurfaceLabel(surface('surf-1', { currentCwd: 'C:\\repos\\wmux' }), undefined, undefined, undefined, undefined),
+    ).toBe('wmux');
+    expect(
+      getSurfaceLabel(surface('surf-1', { currentCwd: 'C:\\repos\\wmux' }), undefined, undefined, undefined, ''),
+    ).toBe('wmux');
+  });
+
+  it('ignores a title on a surface that is not a terminal', () => {
+    // Only a terminal has a program that could have set one; a browser or
+    // markdown tab reaching this code means something is confused, and the
+    // static label is the answer that cannot be wrong.
+    expect(
+      getSurfaceLabel(surface('surf-b', { type: 'browser' }), undefined, undefined, undefined, 'evil'),
+    ).toBe('Browser');
+  });
+});

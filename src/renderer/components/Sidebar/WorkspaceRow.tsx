@@ -1,14 +1,16 @@
 import React, { useState, useRef, useMemo, useEffect } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { WorkspaceInfo, SplitNode, PaneId } from '../../../shared/types';
 import { useStore } from '../../store';
 import { useT } from '../../i18n';
 import { aggregateProgress } from '../../store/progress-slice';
 import { agentsForWorkspace, resolveAgentLinger, WorkspaceAgentsView } from '../../store/agent-view';
 import { claudeSessionsForWorkspace, HookActivityEntry } from '../../store/claude-session-view';
+import { rollupAgents } from '../../store/agent-rollup';
 import UnreadBadge from './UnreadBadge';
 import PrStatusIcon from './PrStatusIcon';
 import { traceState, toolChannel } from './trace-signals';
-import { resolveStatusText, shortenCwd, statusClassFor, type StatusTextInputs, type T } from './workspace-status';
+import { resolveStatusText, shortenCwd, statusClassFor, stateDotClassFor, type StatusTextInputs, type T } from './workspace-status';
 
 /** Stable empty view — avoids allocating a fresh object every collapsed tick. */
 const EMPTY_AGENTS_VIEW: WorkspaceAgentsView = { lines: [], total: 0, running: 0 };
@@ -142,12 +144,18 @@ export default function WorkspaceRow({
   const activeTabIndicator = useStore((state) => state.sidebarPrefs.activeTabIndicator);
   const uiMode = useStore((state) => state.appearancePrefs.uiMode);
 
-  const surfaceProgress = useStore((state) => state.surfaceProgress);
-  const wsProgress = useMemo(() => {
+  // Select only THIS workspace's progress entries, shallow-compared. The slice
+  // replaces the whole surfaceProgress object on any accepted update, so a bare
+  // `state.surfaceProgress` subscription re-rendered EVERY sidebar row for one
+  // pane's OSC 9;4 tick (#141's fan-out, one hop downstream of the slice's own
+  // change-gate). Per-surface entries are identity-stable while unchanged, so
+  // another workspace's progress leaves this array shallow-equal and this row
+  // untouched.
+  const wsProgressEntries = useStore(useShallow((state) => {
     const ids = getAllSurfaceIds(workspace.splitTree);
-    const entries = ids.map((id) => surfaceProgress[id]).filter(Boolean);
-    return aggregateProgress(entries);
-  }, [surfaceProgress, workspace.splitTree]);
+    return ids.map((id) => state.surfaceProgress[id]).filter(Boolean);
+  }));
+  const wsProgress = useMemo(() => aggregateProgress(wsProgressEntries), [wsProgressEntries]);
 
   // Find Claude activity for this workspace's surfaces (from PTY observer)
   const wsActivity = useMemo(() => {
@@ -175,6 +183,15 @@ export default function WorkspaceRow({
     return linger.visible ? view : EMPTY_AGENTS_VIEW;
   }, [workspace.splitTree, claudeActivity, agentMeta, tick, t]);
   const runningAgentCount = wsAgents.running;
+
+  // Use the same sources and precedence as the window-wide roster (#235).
+  const agentIdentities = useStore((state) => state.agentIdentities);
+  const agentDetections = useStore((state) => state.agentDetections);
+  const agentCounts = useMemo(
+    () => rollupAgents([workspace], agentStates ?? {}, Date.now(), agentIdentities, agentDetections)
+      .byWorkspace[workspace.id],
+    [workspace, agentStates, agentIdentities, agentDetections],
+  );
 
   // How long a tool label persists after the last hook/observer event (ms)
   const ACTIVITY_TTL = 5000;
@@ -327,6 +344,7 @@ export default function WorkspaceRow({
   // inputs at least guarantees they are arguing about the same facts.
   const statusInputs = useMemo<StatusTextInputs>(() => ({
     statusOverride: workspace.statusOverride,
+    agentCounts,
     runningAgentCount,
     agentTotal: wsAgents.total,
     sessionCount: sessions.length,
@@ -336,7 +354,7 @@ export default function WorkspaceRow({
     claudeIsIdle,
     shellState: workspace.shellState,
     notificationText: workspace.notificationText,
-  }), [workspace.statusOverride, runningAgentCount, wsAgents, sessions, workingSessions, blockedSessions, currentToolLabel, claudeIsIdle, workspace.shellState, workspace.notificationText]);
+  }), [workspace.statusOverride, agentCounts, runningAgentCount, wsAgents, sessions, workingSessions, blockedSessions, currentToolLabel, claudeIsIdle, workspace.shellState, workspace.notificationText]);
 
   // ── Status text: manual override > tool activity > shell state > default ──
   const statusText = useMemo(() => resolveStatusText(statusInputs, t), [statusInputs, t]);
@@ -356,24 +374,7 @@ export default function WorkspaceRow({
     return parts.length > 0 ? parts.join(' · ') : null;
   }, [workspace.gitBranch, workspace.gitDirty, workspace.cwd]);
 
-  // ── State dot class — pulsing when Claude is active ──
-  const stateDotClass = useMemo(() => {
-    if (workspace.statusOverride) {
-      return workspace.statusOverride === 'running'
-        ? 'workspace-row__state-dot--running'
-        : 'workspace-row__state-dot--idle';
-    }
-    // Above isClaudeActive, mirroring statusClassFor: a blocked workspace was
-    // rendering a GREY dot beside a violet "Needs you", so the two halves of
-    // the same row disagreed about whether anything was wrong.
-    if (blockedSessions > 0) return 'workspace-row__state-dot--blocked';
-    if (isClaudeActive) return 'workspace-row__state-dot--running';
-    if (claudeIsIdle) return 'workspace-row__state-dot--idle';
-    if (workspace.shellState === 'running') return 'workspace-row__state-dot--running';
-    if (workspace.shellState === 'interrupted') return 'workspace-row__state-dot--interrupted';
-    if (workspace.shellState === 'idle') return 'workspace-row__state-dot--idle';
-    return '';
-  }, [workspace.statusOverride, blockedSessions, isClaudeActive, claudeIsIdle, workspace.shellState]);
+  const stateDotClass = stateDotClassFor(statusInputs, isClaudeActive);
 
   return (
     <div

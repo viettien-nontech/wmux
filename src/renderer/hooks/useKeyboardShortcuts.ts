@@ -8,11 +8,27 @@ import { PaneId, SplitNode } from '../../shared/types';
 import { trimTrailingWhitespace } from '../utils/copy-text';
 import { GLOBAL_IN_EDITOR, isEditableTarget } from './shortcut-target';
 import { matchIndexShortcut, resolveIndexTarget } from '../utils/index-shortcuts';
+import { isSafeToIntercept } from '../utils/shortcut-binding';
 import { followOutputFor, togglePinnedPromptFor, togglePromptOutlineFor } from '../store/prompt-actions';
 import { v4 as uuid } from 'uuid';
 import { useT } from '../i18n';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Unshifted character for each punctuation key, by physical code.
+ *
+ * Only consulted when the direct e.key comparison already failed AND Shift is
+ * held, so a non-US layout is unaffected: there the recorder stored whatever
+ * e.key produced, and that matches directly. This exists to rescue the shipped
+ * US-layout defaults (`Ctrl+Shift+[` / `Ctrl+Shift+]`), which are written as
+ * the unshifted character but can only ever arrive as the shifted one.
+ */
+const UNSHIFTED_BY_CODE: Readonly<Record<string, string>> = {
+  BracketLeft: '[', BracketRight: ']', Semicolon: ';', Quote: "'",
+  Comma: ',', Period: '.', Slash: '/', Backquote: '`',
+  Minus: '-', Equal: '=', Backslash: '\\',
+};
 
 export function matchesBinding(e: KeyboardEvent, binding: ShortcutBinding): boolean {
   // Case-insensitive compare for single-letter keys: Shift uppercases e.key on Windows,
@@ -20,43 +36,19 @@ export function matchesBinding(e: KeyboardEvent, binding: ShortcutBinding): bool
   // never match (e.g. Ctrl+Shift+N fires with e.key='N' vs binding.key='n').
   const eventKey = e.key.length === 1 ? e.key.toLowerCase() : e.key;
   const bindingKey = binding.key.length === 1 ? binding.key.toLowerCase() : binding.key;
-  const keyMatch = eventKey === bindingKey;
+  // toLowerCase covers Shift on a LETTER ('N' -> 'n'). It does nothing for
+  // punctuation, where Shift produces a different character entirely: Ctrl+
+  // Shift+] arrives as e.key '}' while DEFAULT_SHORTCUTS stores ']', so
+  // nextSurface/prevSurface could never fire. Fall back to the physical key,
+  // the same way isLetterKey does in ./terminal-keys — e.code is stable under
+  // Shift, so BracketRight identifies ']' whether it produced ']' or '}'.
+  const keyMatch = eventKey === bindingKey
+    || (e.shiftKey && bindingKey.length === 1 && UNSHIFTED_BY_CODE[e.code] === bindingKey);
   const ctrlMatch = !!binding.ctrl === e.ctrlKey;
   const shiftMatch = !!binding.shift === e.shiftKey;
   const altMatch = !!binding.alt === e.altKey;
   return keyMatch && ctrlMatch && shiftMatch && altMatch;
 }
-
-/**
- * Keys that are safe to intercept even when a terminal has focus.
- * All others with only Ctrl held (no Shift/Alt) are forwarded to the terminal.
- */
-const SAFE_CTRL_KEYS = new Set(['b', 'd', 'n', 't', 'w', 'f', ',']);
-
-function isSafeToIntercept(e: KeyboardEvent): boolean {
-  if (!e.ctrlKey) return true; // Not a Ctrl combo — always safe
-
-  // Ctrl+Shift+* and Ctrl+Alt+* are safe (terminal uses bare Ctrl combos)
-  if (e.shiftKey || e.altKey) return true;
-
-  // Ctrl+PageDown / Ctrl+PageUp are safe
-  if (e.key === 'PageDown' || e.key === 'PageUp') return true;
-
-  // Ctrl+F2 is safe (rename)
-  if (e.key === 'F2') return true;
-
-  // Ctrl+F12 is safe (dev tools)
-  if (e.key === 'F12') return true;
-
-  // Ctrl+= / Ctrl+- / Ctrl+0 are safe (font size)
-  if (e.key === '=' || e.key === '-' || e.key === '0') return true;
-
-  // Specifically whitelisted bare Ctrl keys
-  if (SAFE_CTRL_KEYS.has(e.key.toLowerCase())) return true;
-
-  return false;
-}
-
 
 // ─── Spatial pane navigation ─────────────────────────────────────────────────
 
