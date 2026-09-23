@@ -3,7 +3,9 @@
 # every pane - including the one that started this. Log: %TEMP%\wmux-repack.log
 $ErrorActionPreference = 'Continue'
 $log = Join-Path $env:TEMP 'wmux-repack.log'
-function Say($s) { "$(Get-Date -Format 'HH:mm:ss') $s" | Tee-Object -FilePath $log -Append }
+# Add-Content everywhere: on Windows PowerShell 5.1, `>>` and Tee-Object write
+# UTF-16 and would interleave with this ASCII log.
+function Say($s) { "$(Get-Date -Format 'HH:mm:ss') $s" | Add-Content $log }
 "" | Set-Content $log
 Say 'start - waiting 15s so the pane that launched this can finish its reply'
 Start-Sleep 15
@@ -21,7 +23,7 @@ Say 'wmux closed'
 
 Set-Location (Split-Path $PSScriptRoot -Parent)
 Say 'npm run package:app ...'
-npm run package:app *>> $log
+npm run package:app 2>&1 | ForEach-Object { "$_" } | Add-Content $log
 if ($LASTEXITCODE -ne 0) { Say "PACKAGE FAILED (exit $LASTEXITCODE) - relaunching the old app anyway" }
 
 $asar = Join-Path $env:USERPROFILE 'wmux-app\resources\app.asar'
